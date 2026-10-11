@@ -2,12 +2,16 @@
   "name": "manja-ugc-db-foundation",
   "private": true,
   "version": "0.0.0",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "test:concurrency": "node 08_tests/concurrency/02_job_terminal_races.js",
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
     "bullmq": "^5.58.5",
+    "openai": "^7.28.0",
     "pg": "^8.13.1"
   },
   "devDependencies": {
