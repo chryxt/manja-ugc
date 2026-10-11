@@ -7,8 +7,16 @@ import { LeaseHeartbeat } from './lease-heartbeat';
 
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
 
+export type WorkerHandlerResult =
+  | { kind: 'completed' }
+  | { kind: 'deferred' };
+
 export interface WorkerJobHandler {
-  execute(context: ExecutionContext, job: JobRecord, signal: AbortSignal): Promise<void>;
+  execute(
+    context: ExecutionContext,
+    job: JobRecord,
+    signal: AbortSignal,
+  ): Promise<WorkerHandlerResult>;
 }
 
 export interface JobProcessorOptions {
@@ -46,7 +54,6 @@ export class JobProcessor {
       heartbeat = new LeaseHeartbeat(this.rpc, lease, { ttlSeconds: this.options.leaseTtlSeconds ?? 60 });
       heartbeat.start();
 
-      // Re-read after claim so orchestration acts on current authoritative state.
       job = await this.jobs.getById(jobId);
       if (TERMINAL_STATUSES.has(job.status)) return;
 
@@ -57,12 +64,14 @@ export class JobProcessor {
 
       heartbeat.assertHealthy();
       const context = new ExecutionContext(this.rpc, lease);
-      await handler.execute(context, job, heartbeat.abortController.signal);
+      const result = await handler.execute(context, job, heartbeat.abortController.signal);
       heartbeat.assertHealthy();
       await context.assertLease();
 
-      // Handlers perform orchestration steps/operations but never settle money directly.
-      // Terminal settlement remains centralized here through the DB primitive.
+      // Deferred handlers have durably scheduled their next wakeup and intentionally
+      // leave the job non-terminal (typically waiting_provider). Release the worker lease.
+      if (result.kind === 'deferred') return;
+
       const latest = await this.jobs.getById(jobId);
       if (!TERMINAL_STATUSES.has(latest.status)) {
         if (!latest.createdBy) {
@@ -81,13 +90,9 @@ export class JobProcessor {
       }
 
       if (decision.disposition === 'operational-stop') {
-        // Invariant/state incidents are intentionally not compensated by worker-side guesses.
         throw new UnrecoverableError(`${decision.code}: ${decision.message}`);
       }
 
-      // Infrastructure retry: same authoritative DB job, same billing reservation.
-      // Only when this worker actually owns the execution lease and BullMQ has exhausted
-      // its bounded retry budget do we terminalize the job and release its reservation.
       if (retry.isFinalAttempt && lease) {
         await this.terminalizeOrThrow(job, 'INFRA_RETRY_EXHAUSTED', decision.message);
         throw new UnrecoverableError(`INFRA_RETRY_EXHAUSTED: ${decision.message}`);
