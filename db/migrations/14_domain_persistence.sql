@@ -9,7 +9,7 @@ ALTER TABLE public.products
 ALTER TABLE public.products
   ADD CONSTRAINT fk_products_dna_source_job
   FOREIGN KEY (dna_source_job_id, workspace_id)
-  REFERENCES public.jobs(id, workspace_id) ON DELETE SET NULL;
+  REFERENCES public.jobs(id, workspace_id) ON DELETE RESTRICT;
 
 ALTER TABLE public.product_assets
   ADD COLUMN public_url TEXT,
@@ -24,7 +24,7 @@ ALTER TABLE public.storyboards
   ADD CONSTRAINT storyboards_status_check CHECK (status IN ('draft','approved','rejected','archived')),
   ADD CONSTRAINT fk_storyboards_source_job
     FOREIGN KEY (source_job_id, workspace_id)
-    REFERENCES public.jobs(id, workspace_id) ON DELETE SET NULL;
+    REFERENCES public.jobs(id, workspace_id) ON DELETE RESTRICT;
 
 CREATE TABLE public.job_domain_inputs (
   job_id UUID PRIMARY KEY,
