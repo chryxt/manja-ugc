@@ -1,4 +1,5 @@
-import type { JobRecord, JobRepository } from '../../db/job-repository';
+import type { JobOperationRecord, JobRecord, JobRepository } from '../../db/job-repository';
+import type { DomainPersistence } from '../../domain/persistence';
 import type { GeminiAdapter } from '../../providers/gemini/gemini-adapter';
 import { ProviderErrorClassification, ProviderExecutionError } from '../../providers/types';
 import type { WorkerHandlerResult, WorkerJobHandler } from '../job-processor';
@@ -11,6 +12,7 @@ export class ProductDnaHandler implements WorkerJobHandler {
   constructor(
     private readonly jobs: JobRepository,
     private readonly inputs: JobDomainInputResolver,
+    private readonly persistence: DomainPersistence,
     private readonly gemini: GeminiAdapter,
   ) {}
 
@@ -20,7 +22,10 @@ export class ProductDnaHandler implements WorkerJobHandler {
     signal: AbortSignal,
   ): Promise<WorkerHandlerResult> {
     const existing = await this.jobs.getLatestOperation(job.id, OPERATION_KEY);
-    if (existing?.status === 'succeeded') return { kind: 'completed' };
+    if (existing?.status === 'succeeded') {
+      await this.persistFromOperation(job, existing);
+      return { kind: 'completed' };
+    }
 
     // Gemini synchronous requests have no verified external idempotency primitive. If a
     // previous worker died while the request outcome was ambiguous, auto-resubmission could
@@ -36,13 +41,13 @@ export class ProductDnaHandler implements WorkerJobHandler {
 
     const payload = await this.inputs.getProductDnaPayload(job);
 
-    await context.executeProviderTask(
+    const result = await context.executeProviderTask(
       'gemini',
       OPERATION_KEY,
       'product_dna',
       { mode: 'product_dna' },
       async (operationId) => {
-        const result = await this.gemini.submit(
+        const providerResult = await this.gemini.submit(
           operationId,
           'product_dna',
           payload,
@@ -55,15 +60,39 @@ export class ProductDnaHandler implements WorkerJobHandler {
         );
 
         return {
-          providerOperationId: result.providerOperationId,
+          providerOperationId: providerResult.providerOperationId,
           metadata: {
-            provider: result.metadata,
-            response: result.responsePayload,
+            provider: providerResult.metadata,
+            response: providerResult.responsePayload,
           },
         };
       },
     );
 
+    const metadata = result.metadata as { response?: unknown } | undefined;
+    if (metadata?.response === undefined) {
+      throw new ProviderExecutionError(
+        ProviderErrorClassification.FATAL_P0,
+        'PRODUCT_DNA_RESULT_MISSING',
+        'Gemini Product DNA operation completed without a persisted response payload',
+      );
+    }
+
+    await this.persistence.saveProductDna(job, metadata.response);
     return { kind: 'completed' };
+  }
+
+  private async persistFromOperation(job: JobRecord, operation: JobOperationRecord): Promise<void> {
+    const metadata = operation.responseMetadata as { response?: unknown } | null;
+    if (metadata?.response === undefined) {
+      throw new ProviderExecutionError(
+        ProviderErrorClassification.FATAL_P0,
+        'PRODUCT_DNA_RESULT_MISSING',
+        `Succeeded Product DNA operation ${operation.id} has no response payload`,
+        operation,
+      );
+    }
+
+    await this.persistence.saveProductDna(job, metadata.response);
   }
 }
