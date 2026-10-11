@@ -38,7 +38,8 @@ export class OutboxDispatcher {
           throw new Error(`Outbox payload jobId mismatch for ${message.outboxId}`);
         }
 
-        await this.queue.addJob(message.queueName, { jobId: message.jobId });
+        const deliveryId = `${message.outboxId}:${message.attemptCount}`;
+        await this.queue.addJob(message.queueName, { jobId: message.jobId }, deliveryId);
         await this.outbox.complete(message.outboxId, message.claimToken);
         completed += 1;
       } catch (error) {
