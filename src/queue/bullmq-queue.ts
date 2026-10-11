@@ -6,6 +6,16 @@ export interface BullMQDispatchQueueOptions {
   defaultJobOptions?: JobsOptions;
 }
 
+const SAFE_DEFAULT_JOB_OPTIONS: JobsOptions = {
+  attempts: 5,
+  backoff: {
+    type: 'exponential',
+    delay: 5_000,
+  },
+  removeOnComplete: 1_000,
+  removeOnFail: 5_000,
+};
+
 export class BullMQDispatchQueue implements DispatchQueue {
   private readonly queues = new Map<string, Queue<JobQueuePayload>>();
 
@@ -15,7 +25,7 @@ export class BullMQDispatchQueue implements DispatchQueue {
     const queue = this.getQueue(queueName);
 
     await queue.add('execute-job', payload, {
-      ...this.options.defaultJobOptions,
+      ...this.getDefaultJobOptions(),
       // Deterministic identity makes repeated outbox delivery converge on one BullMQ job.
       jobId: payload.jobId,
     });
@@ -32,9 +42,17 @@ export class BullMQDispatchQueue implements DispatchQueue {
 
     const queue = new Queue<JobQueuePayload>(queueName, {
       connection: this.options.connection,
-      defaultJobOptions: this.options.defaultJobOptions,
+      defaultJobOptions: this.getDefaultJobOptions(),
     });
     this.queues.set(queueName, queue);
     return queue;
+  }
+
+  private getDefaultJobOptions(): JobsOptions {
+    return {
+      ...SAFE_DEFAULT_JOB_OPTIONS,
+      ...this.options.defaultJobOptions,
+      backoff: this.options.defaultJobOptions?.backoff ?? SAFE_DEFAULT_JOB_OPTIONS.backoff,
+    };
   }
 }
