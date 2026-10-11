@@ -1,6 +1,6 @@
 # ADR-0001: Transactional Outbox for Reliable Job Dispatch
 
-Status: Proposed
+Status: Accepted
 
 ## Context
 
@@ -14,138 +14,110 @@ Use a PostgreSQL transactional outbox as the reliability boundary between databa
 
 ### Queue payload
 
-BullMQ carries only authoritative pointers:
+BullMQ carries only:
 
 ```json
-{
-  "jobId": "uuid"
-}
+{ "jobId": "uuid" }
 ```
 
-Optional `traceId` / `correlationId` may be included for observability only. They are never authoritative for billing, actor identity, lineage, or job state.
+No pricing, billing state, actor identity, retry lineage, or lifecycle authority is stored in Redis.
 
 ### Outbox row
 
-Introduce a `job_dispatch_outbox` table with one logical dispatch record per job generation.
+`public.job_dispatch_outbox` stores one durable dispatch record per job and uses:
 
-Recommended fields:
+- `pending`
+- `processing`
+- `completed`
+- `failed`
 
-- `id uuid primary key`
-- `workspace_id uuid not null`
-- `job_id uuid not null`
-- `dispatch_kind text not null default 'JOB_EXECUTE'`
-- `status text not null` with `PENDING`, `DISPATCHING`, `DISPATCHED`, `DEAD`
-- `attempt_count integer not null default 0`
-- `available_at timestamptz not null default now()`
-- `claimed_by text null`
-- `claim_token uuid null`
-- `claim_expires_at timestamptz null`
-- `last_error_code text null`
-- `last_error_message text null`
-- `dispatched_at timestamptz null`
-- `created_at timestamptz not null default now()`
-- `updated_at timestamptz not null default now()`
+A processing row carries `claim_token`, `claimed_by`, and `lease_expires_at`. Completion and failure RPCs require the claim token, preventing a stale dispatcher from acknowledging work after another dispatcher has recovered the expired lease.
 
-Physical invariants:
+Physical invariants include:
 
 - composite FK `(job_id, workspace_id) -> jobs(id, workspace_id)`
-- at most one active dispatch row per logical job delivery identity
-- terminal `DISPATCHED` rows are immutable except metadata that does not affect semantics
+- one outbox row per job
+- payload must contain `jobId`
+- processing rows must carry a valid claim tuple
+- completed rows must carry `completed_at`
+- FK delete action is `RESTRICT` to preserve dispatch history
 
 ### Atomic creation
 
-A job that must be dispatched is inserted into the outbox in the same PostgreSQL transaction that creates the authoritative job/reservation state.
-
-The application must never rely on:
-
-1. commit database transaction;
-2. call Redis;
-3. hope both succeeded.
-
-The outbox row is the durable evidence that queue delivery still needs to occur.
+A trigger on queued `jobs` inserts the outbox row in the same PostgreSQL transaction. `create_job_and_reserve_credits()` and `retry_job()` therefore cannot commit a new queued job without also persisting dispatch intent.
 
 ### Dispatcher / sweeper
 
-A dispatcher process periodically claims eligible rows using PostgreSQL row locking, for example `FOR UPDATE SKIP LOCKED`.
+`private.claim_outbox_messages()` uses `FOR UPDATE SKIP LOCKED` and may claim:
 
-Claim order:
+1. ready `pending` rows; or
+2. `processing` rows whose dispatch lease has expired.
 
-1. select `PENDING` rows where `available_at <= now()`;
-2. atomically mark them `DISPATCHING` with a short claim lease and increment `attempt_count`;
-3. commit;
-4. call BullMQ `queue.add()` using deterministic queue job identity derived from the database job id;
-5. on success, mark the outbox row `DISPATCHED`;
-6. on failure, return it to `PENDING` with exponential backoff, or move it to `DEAD` after an operational threshold.
+Claiming generates a fresh `claim_token`, records `claimed_by`, increments `attempt_count`, and sets a short lease expiry.
 
-The dispatcher claim is orchestration metadata, not financial state.
+The dispatcher then:
+
+1. calls BullMQ `Queue.add()`;
+2. marks the row completed only after Redis accepts the enqueue;
+3. on failure, returns the row to pending with delay or marks it failed after the attempt cap.
 
 ### Deterministic BullMQ identity
 
-Use the database `jobId` as the BullMQ job identity where practical. Duplicate queue inserts are treated as transport-level idempotency only.
+Use database `jobId` as the BullMQ job ID. Repeated outbox deliveries therefore converge on one transport identity where BullMQ deduplication applies.
 
-BullMQ deduplication must never be treated as the authoritative exactly-once mechanism. PostgreSQL state machines, execution leases, operation idempotency, and provider idempotency remain the safety layers.
+BullMQ deduplication is only an optimization. PostgreSQL state machines, execution leases, operation idempotency, and provider idempotency remain the safety layers.
 
-### Recovery guarantees
+### Delivery semantics
 
-If Redis is unavailable after the database commit:
+This design is **at-least-once**, not distributed exactly-once.
 
-- the outbox row remains `PENDING`;
-- the sweeper retries later;
-- the job cannot become permanently invisible solely because of the Redis outage.
+If Redis accepts an enqueue but the dispatcher crashes before `complete_outbox_message()`, the outbox lease eventually expires and the message may be added again. This is acceptable because:
 
-If the dispatcher crashes after BullMQ accepts the message but before the database row is marked `DISPATCHED`:
-
-- the outbox row becomes claimable again after lease expiry;
-- a repeated `queue.add()` may occur;
-- duplicate delivery is safe because the queue carries only `jobId`, the worker must acquire the PostgreSQL execution lease, and job/operation RPCs remain authoritative.
-
-This is an at-least-once dispatch design with application-level idempotency, not a claim of distributed exactly-once delivery.
+- queue payload is only `{ jobId }`;
+- worker execution requires the PostgreSQL execution lease;
+- job/operation RPCs remain authoritative;
+- provider adapters will use provider-side idempotency where supported.
 
 ## BullMQ retry policy boundary
 
 BullMQ retries are infrastructure retries of the same authoritative database job.
 
-They must never call `private.retry_job()` automatically. `private.retry_job()` creates a new billed job entity and is a product/business action, not a queue transport retry.
-
-Retryable infrastructure failures may include:
-
-- Redis delivery interruption;
-- transient worker process failure;
-- transient provider/network errors when provider-side idempotency is available;
-- temporary database connection failures.
-
-Permanent/domain failures should be written to the database through the existing terminal RPCs and should not loop indefinitely in BullMQ.
+They must never call `private.retry_job()` automatically. `private.retry_job()` creates a new billed business job and remains an explicit product action.
 
 ## Sweeper responsibilities
 
 The sweeper has two independent duties:
 
-1. Redis dispatch recovery: reclaim stale `DISPATCHING` outbox rows and retry delivery.
-2. Execution recovery: inspect expired PostgreSQL execution leases and hand eligible non-terminal jobs back to orchestration logic.
+1. recover pending/stale outbox dispatch;
+2. recover expired execution leases for eligible non-terminal jobs.
 
-It must not infer financial corrections directly. Settlement/release remains exclusively behind private database RPCs.
+It must not make direct financial corrections. Settlement and release remain behind private database RPCs.
 
-## Ordering with the remaining BullMQ foundation
+## Security
 
-Implementation order:
+Do not issue schema-wide `REVOKE ALL ON ALL FUNCTIONS IN SCHEMA private`, because that can accidentally revoke existing RLS helpers and frozen RPC grants. New outbox RPCs are revoked and granted individually.
+
+## Implementation order
 
 1. transactional outbox schema + claim/complete/fail RPCs;
-2. dispatcher/sweeper service;
-3. queue connection and typed `{ jobId }` payload;
-4. BullMQ worker retry/backoff/concurrency policy;
-5. provider adapters with `operationId` mapped to provider idempotency keys where supported.
+2. typed `OutboxRPC` gateway;
+3. dispatcher service;
+4. BullMQ adapter with deterministic `jobId`;
+5. worker retry/backoff/concurrency policy;
+6. provider adapters with external idempotency keys where supported.
 
 ## Consequences
 
 Benefits:
 
-- eliminates the PostgreSQL-commit / Redis-enqueue ghost-job gap;
-- preserves Thin Queue / Thick Database boundaries;
-- tolerates dispatcher crashes and duplicate delivery;
-- provides operational visibility for undelivered jobs.
+- closes the PostgreSQL-commit / Redis-enqueue ghost-job gap;
+- supports horizontal dispatchers with `SKIP LOCKED`;
+- survives dispatcher crashes through claim-lease recovery;
+- protects acknowledgements with claim-token fencing;
+- preserves Thin Queue / Thick Database boundaries.
 
 Costs:
 
-- one additional durable table and dispatcher process;
-- at-least-once delivery semantics require duplicate-safe consumers;
-- outbox retention/cleanup policy is required.
+- one durable outbox table and dispatcher process;
+- at-least-once semantics require duplicate-safe consumers;
+- failed-message escalation and retention cleanup policies are required.
