@@ -1,6 +1,9 @@
 name: Job API Concurrency Gate
 
 on:
+  push:
+    branches:
+      - chatgpt/job-api-concurrency
   pull_request:
     branches: [main]
   workflow_dispatch:
