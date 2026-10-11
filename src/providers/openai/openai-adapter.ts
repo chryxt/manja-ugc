@@ -102,8 +102,9 @@ export class OpenAIAdapter
         timeout: this.timeoutMs,
       });
 
-      const isTerminal = isTerminalStatus(response.status);
-      const isSuccess = response.status === 'completed';
+      const status = response.status ?? 'unknown';
+      const isTerminal = isTerminalStatus(status);
+      const isSuccess = status === 'completed';
 
       return {
         isTerminal,
@@ -144,17 +145,19 @@ export class OpenAIAdapter
   }
 
   private metadata(operationType: string, response: OpenAIResponse): OpenAIProviderMetadata {
+    const responseWithRequestId = response as OpenAIResponse & { _request_id?: string };
     return {
       operationType,
-      requestId: response._request_id,
-      responseStatus: response.status,
+      requestId: responseWithRequestId._request_id,
+      responseStatus: response.status ?? 'unknown',
       model: response.model,
       usage: response.usage,
     };
   }
 
   private isTerminalFailure(response: OpenAIResponse): boolean {
-    return isTerminalStatus(response.status) && response.status !== 'completed';
+    const status = response.status ?? 'unknown';
+    return isTerminalStatus(status) && status !== 'completed';
   }
 
   private responseFailure(response: OpenAIResponse): ProviderExecutionError {
@@ -168,7 +171,7 @@ export class OpenAIAdapter
   }
 }
 
-function isTerminalStatus(status: string): boolean {
+function isTerminalStatus(status: string | undefined): boolean {
   return status === 'completed' || status === 'failed' || status === 'cancelled' || status === 'incomplete';
 }
 
@@ -177,9 +180,10 @@ function responseFailureShape(response: OpenAIResponse): {
   message: string;
   classification: ProviderErrorClassification;
 } {
+  const status = response.status ?? 'unknown';
   const responseError = response.error as { code?: string; message?: string } | null | undefined;
-  const code = responseError?.code ?? `OPENAI_RESPONSE_${response.status.toUpperCase()}`;
-  const message = responseError?.message ?? `OpenAI response finished with status ${response.status}`;
+  const code = responseError?.code ?? `OPENAI_RESPONSE_${status.toUpperCase()}`;
+  const message = responseError?.message ?? `OpenAI response finished with status ${status}`;
   return {
     code,
     message,
