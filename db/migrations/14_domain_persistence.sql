@@ -79,4 +79,81 @@ CREATE POLICY generated_videos_select ON public.generated_videos
 FOR SELECT TO authenticated
 USING (private.user_has_workspace_role(workspace_id, ARRAY['owner','admin','member']::public.workspace_role[]));
 
+-- Atomic domain-aware job creation. The existing financial primitive remains authoritative;
+-- this wrapper binds the new job to product/storyboard inputs before the transaction commits.
+CREATE OR REPLACE FUNCTION private.create_domain_job_and_reserve_credits(
+  p_workspace_id UUID,
+  p_job_type TEXT,
+  p_actor_user_id UUID,
+  p_idempotency_key TEXT,
+  p_product_id UUID DEFAULT NULL,
+  p_storyboard_id UUID DEFAULT NULL
+) RETURNS UUID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+  v_job_id UUID;
+  v_existing_product_id UUID;
+  v_existing_storyboard_id UUID;
+BEGIN
+  IF p_product_id IS NULL AND p_storyboard_id IS NULL THEN
+    RAISE EXCEPTION 'Domain job requires product or storyboard binding' USING ERRCODE='22023';
+  END IF;
+
+  IF p_job_type IN ('product_dna','catalog_image') AND p_product_id IS NULL THEN
+    RAISE EXCEPTION 'Job type % requires product binding', p_job_type USING ERRCODE='22023';
+  END IF;
+
+  IF p_job_type = 'ugc_video' AND (p_product_id IS NULL OR p_storyboard_id IS NULL) THEN
+    RAISE EXCEPTION 'ugc_video requires product and storyboard binding' USING ERRCODE='22023';
+  END IF;
+
+  IF p_product_id IS NOT NULL THEN
+    PERFORM 1 FROM public.products
+    WHERE id=p_product_id AND workspace_id=p_workspace_id;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'Product not found in workspace' USING ERRCODE='P0002';
+    END IF;
+  END IF;
+
+  IF p_storyboard_id IS NOT NULL THEN
+    PERFORM 1 FROM public.storyboards
+    WHERE id=p_storyboard_id AND workspace_id=p_workspace_id;
+    IF NOT FOUND THEN
+      RAISE EXCEPTION 'Storyboard not found in workspace' USING ERRCODE='P0002';
+    END IF;
+  END IF;
+
+  v_job_id := private.create_job_and_reserve_credits(
+    p_workspace_id,
+    p_job_type,
+    p_actor_user_id,
+    p_idempotency_key
+  );
+
+  INSERT INTO public.job_domain_inputs(job_id,workspace_id,product_id,storyboard_id)
+  VALUES(v_job_id,p_workspace_id,p_product_id,p_storyboard_id)
+  ON CONFLICT (job_id) DO NOTHING;
+
+  SELECT product_id,storyboard_id
+  INTO v_existing_product_id,v_existing_storyboard_id
+  FROM public.job_domain_inputs
+  WHERE job_id=v_job_id AND workspace_id=p_workspace_id;
+
+  IF v_existing_product_id IS DISTINCT FROM p_product_id
+     OR v_existing_storyboard_id IS DISTINCT FROM p_storyboard_id THEN
+    RAISE EXCEPTION 'Idempotency key reused with different domain binding' USING ERRCODE='22023';
+  END IF;
+
+  RETURN v_job_id;
+END;
+$$;
+
+REVOKE ALL ON FUNCTION private.create_domain_job_and_reserve_credits(UUID,TEXT,UUID,TEXT,UUID,UUID)
+FROM PUBLIC,anon,authenticated;
+GRANT EXECUTE ON FUNCTION private.create_domain_job_and_reserve_credits(UUID,TEXT,UUID,TEXT,UUID,UUID)
+TO service_role;
+
 COMMIT;
