@@ -7,6 +7,7 @@
   },
   "scripts": {
     "test:concurrency": "node 08_tests/concurrency/02_job_terminal_races.js",
+    "test:domain": "node 08_tests/domain/03_domain_persistence_smoke.js",
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
