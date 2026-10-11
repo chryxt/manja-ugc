@@ -44,13 +44,19 @@ export class OutboxDispatcher {
       } catch (error) {
         failed += 1;
         const errorMessage = error instanceof Error ? error.message : String(error);
-        await this.outbox.fail(
-          message.outboxId,
-          message.claimToken,
-          errorMessage,
-          this.options.retryDelaySeconds ?? 5,
-          this.options.maxAttempts ?? 10,
-        );
+
+        try {
+          await this.outbox.fail(
+            message.outboxId,
+            message.claimToken,
+            errorMessage,
+            this.options.retryDelaySeconds ?? 5,
+            this.options.maxAttempts ?? 10,
+          );
+        } catch {
+          // The claim may already have been recovered/fenced by another dispatcher.
+          // Do not let one stale acknowledgement abort the rest of this batch.
+        }
       }
     }
 
