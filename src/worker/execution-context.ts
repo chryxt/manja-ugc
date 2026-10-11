@@ -1,8 +1,12 @@
-import type { AIProvider, ExecutionLease, JobOperationStatus, JobRPC } from '../db/job-rpc';
+import type { AIProvider, ExecutionLease, JobOperationStatus, JobRPC, JobStatus } from '../db/job-rpc';
 
 export interface ProviderCallResult {
   providerOperationId?: string;
   metadata?: unknown;
+}
+
+export interface AsyncProviderSubmissionResult extends ProviderCallResult {
+  providerOperationId: string;
 }
 
 export class ExecutionContext {
@@ -10,6 +14,10 @@ export class ExecutionContext {
     private readonly rpc: JobRPC,
     readonly lease: ExecutionLease,
   ) {}
+
+  get jobId(): string {
+    return this.lease.jobId;
+  }
 
   async heartbeat(ttlSeconds = 60): Promise<Date> {
     return this.rpc.renewExecutionLease(this.lease, ttlSeconds);
@@ -19,6 +27,11 @@ export class ExecutionContext {
     await this.rpc.assertExecutionLease(this.lease);
   }
 
+  async transition(newStatus: JobStatus, newStep?: string): Promise<void> {
+    await this.assertLease();
+    await this.rpc.transitionJobState(this.jobId, newStatus, newStep);
+  }
+
   async executeProviderTask(
     provider: AIProvider,
     operationKey: string,
@@ -26,25 +39,22 @@ export class ExecutionContext {
     requestMetadata: unknown,
     providerCall: (operationId: string) => Promise<ProviderCallResult>,
   ): Promise<ProviderCallResult> {
-    // Spending gate #1: stale/fenced workers stop before creating a provider operation.
     await this.assertLease();
 
     const operationId = await this.rpc.startOperation(
-      this.lease.jobId,
+      this.jobId,
       provider,
       operationKey,
       operationType,
       requestMetadata,
     );
 
-    // Spending gate #2: re-check immediately before the external side effect.
-    // This narrows the lease-expiry window after the DB operation was recorded.
     await this.assertLease();
 
     try {
       const result = await providerCall(operationId);
       await this.rpc.finalizeOperation(
-        this.lease.jobId,
+        this.jobId,
         operationId,
         'succeeded',
         result.providerOperationId,
@@ -52,15 +62,80 @@ export class ExecutionContext {
       );
       return result;
     } catch (error) {
-      const providerError = error as { code?: string; message?: string };
+      const providerError = error as { code?: string; providerCode?: string; message?: string };
       await this.safeFinalizeOperation(
         operationId,
         'failed',
-        providerError.code ?? 'PROVIDER_ERROR',
+        providerError.providerCode ?? providerError.code ?? 'PROVIDER_ERROR',
         providerError.message ?? 'Provider call failed',
       );
       throw error;
     }
+  }
+
+  async submitAsyncProviderTask(
+    provider: AIProvider,
+    operationKey: string,
+    operationType: string,
+    requestMetadata: unknown,
+    providerCall: (operationId: string) => Promise<AsyncProviderSubmissionResult>,
+  ): Promise<{ operationId: string; submission: AsyncProviderSubmissionResult }> {
+    await this.assertLease();
+
+    const operationId = await this.rpc.startOperation(
+      this.jobId,
+      provider,
+      operationKey,
+      operationType,
+      requestMetadata,
+    );
+
+    await this.assertLease();
+
+    try {
+      const submission = await providerCall(operationId);
+      await this.rpc.recordOperationSubmission(
+        this.jobId,
+        operationId,
+        submission.providerOperationId,
+        submission.metadata,
+      );
+      return { operationId, submission };
+    } catch (error) {
+      const providerError = error as { code?: string; providerCode?: string; message?: string };
+      await this.safeFinalizeOperation(
+        operationId,
+        'failed',
+        providerError.providerCode ?? providerError.code ?? 'PROVIDER_ERROR',
+        providerError.message ?? 'Provider submission failed',
+      );
+      throw error;
+    }
+  }
+
+  async finalizeSubmittedOperation(
+    operationId: string,
+    outcome: Extract<JobOperationStatus, 'succeeded' | 'failed' | 'cancelled'>,
+    providerOperationId?: string,
+    responseMetadata?: unknown,
+    errorCode?: string,
+    errorMessage?: string,
+  ): Promise<void> {
+    await this.assertLease();
+    await this.rpc.finalizeOperation(
+      this.jobId,
+      operationId,
+      outcome,
+      providerOperationId,
+      responseMetadata,
+      errorCode,
+      errorMessage,
+    );
+  }
+
+  async scheduleWakeup(operationId: string, delaySeconds = 15): Promise<string> {
+    await this.assertLease();
+    return this.rpc.scheduleJobWakeup(this.jobId, operationId, delaySeconds);
   }
 
   private async safeFinalizeOperation(
@@ -71,7 +146,7 @@ export class ExecutionContext {
   ): Promise<void> {
     try {
       await this.rpc.finalizeOperation(
-        this.lease.jobId,
+        this.jobId,
         operationId,
         outcome,
         undefined,
@@ -81,7 +156,6 @@ export class ExecutionContext {
       );
     } catch {
       // The DB is authoritative. A competing terminal/cancellation path may have won.
-      // Caller still receives the original provider error.
     }
   }
 }
