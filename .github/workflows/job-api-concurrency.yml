@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: job-api-concurrency-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   concurrency-gate:
     runs-on: ubuntu-latest
