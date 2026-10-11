@@ -8,6 +8,7 @@ export interface ClaimedOutboxMessage {
   payload: { jobId: string };
   claimToken: string;
   leaseExpiresAt: Date;
+  attemptCount: number;
 }
 
 export class OutboxRPC {
@@ -26,6 +27,7 @@ export class OutboxRPC {
         payload: { jobId: string };
         claim_token: string;
         lease_expires_at: Date;
+        attempt_count: number;
       }>(
         `SELECT * FROM private.claim_outbox_messages($1, $2, $3)`,
         [dispatcherId, batchSize, leaseSeconds],
@@ -38,6 +40,7 @@ export class OutboxRPC {
         payload: row.payload,
         claimToken: row.claim_token,
         leaseExpiresAt: row.lease_expires_at,
+        attemptCount: Number(row.attempt_count),
       }));
     } catch (error) {
       mapDatabaseError(error);
