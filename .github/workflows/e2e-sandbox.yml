@@ -1,0 +1,69 @@
+name: Live E2E Sandbox
+
+on:
+  workflow_dispatch:
+    inputs:
+      product_dna_model:
+        description: Gemini model for Product DNA
+        required: true
+        type: string
+      ugc_script_model:
+        description: OpenAI model for UGC script generation
+        required: true
+        type: string
+      veo_model:
+        description: Gemini/Veo model for video generation
+        required: true
+        type: string
+      timeout_minutes:
+        description: Maximum E2E runtime in minutes
+        required: false
+        default: '45'
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: live-e2e-sandbox
+  cancel-in-progress: false
+
+jobs:
+  live-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    environment: sandbox
+
+    env:
+      DATABASE_URL: ${{ secrets.SANDBOX_DATABASE_URL }}
+      REDIS_URL: ${{ secrets.SANDBOX_REDIS_URL }}
+      E2E_ACTOR_USER_ID: ${{ secrets.E2E_ACTOR_USER_ID }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET: ${{ secrets.R2_BUCKET }}
+      R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+      E2E_PRODUCT_DNA_MODEL: ${{ inputs.product_dna_model }}
+      E2E_UGC_SCRIPT_MODEL: ${{ inputs.ugc_script_model }}
+      E2E_VEO_MODEL: ${{ inputs.veo_model }}
+      E2E_TIMEOUT_MS: ${{ fromJSON(inputs.timeout_minutes) * 60000 }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Typecheck live runner
+        run: npm run typecheck
+
+      - name: Run live E2E sandbox
+        run: npm run test:e2e:sandbox
