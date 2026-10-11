@@ -1,28 +1,45 @@
 {
-  "name": "manja-ugc-db-foundation",
+  "name": "manja-ugc",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
   "engines": {
     "node": ">=22"
   },
   "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "npm run typecheck:backend && npm run typecheck:web",
+    "typecheck:backend": "tsc -p tsconfig.backend.json",
+    "typecheck:web": "tsc -p tsconfig.json --noEmit",
     "test:concurrency": "node 08_tests/concurrency/02_job_terminal_races.js",
     "test:domain": "node 08_tests/domain/03_domain_persistence_smoke.js",
-    "test:e2e:sandbox": "tsx 04_e2e_sandbox_run.ts",
-    "typecheck": "tsc -p tsconfig.json"
+    "test:e2e:sandbox": "tsx 04_e2e_sandbox_run.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.911.0",
     "@aws-sdk/lib-storage": "^3.911.0",
     "@aws-sdk/s3-request-presigner": "^3.911.0",
     "@google/genai": "^2.28.0",
+    "@supabase/ssr": "^0.7.0",
+    "@supabase/supabase-js": "^2.78.0",
     "bullmq": "^5.58.5",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.545.0",
+    "next": "^16.0.0",
     "openai": "^7.28.0",
-    "pg": "^8.13.1"
+    "pg": "^8.13.1",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "tailwind-merge": "^3.3.1"
   },
   "devDependencies": {
+    "@tailwindcss/postcss": "^4.1.14",
     "@types/node": "^24.7.2",
     "@types/pg": "^8.15.5",
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.2",
+    "tailwindcss": "^4.1.14",
     "tsx": "^4.20.6",
     "typescript": "^5.9.3"
   }
