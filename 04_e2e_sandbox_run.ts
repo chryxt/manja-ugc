@@ -7,12 +7,12 @@ import { OutboxRPC } from './src/db/outbox-rpc.js';
 import { DomainJobRPC } from './src/domain/domain-job-rpc.js';
 import { PostgresJobDomainResolver } from './src/domain/job-domain-resolver.js';
 import { DomainPersistence } from './src/domain/persistence.js';
-import { GeminiAdapter } from './src/providers/gemini/gemini-adapter.js';
 import { GeminiVideoAssetSource } from './src/providers/gemini/gemini-video-asset-source.js';
 import { OpenAIAdapter } from './src/providers/openai/openai-adapter.js';
 import { BullMQDispatchQueue } from './src/queue/bullmq-queue.js';
 import { OutboxDispatcher } from './src/queue/dispatcher.js';
 import { R2StorageAdapter } from './src/storage/r2-adapter.js';
+import { E2EGeminiAdapter, E2ERemoteAssetSource, type E2EVideoMode } from './src/testing/e2e-mock-veo.js';
 import { createBullMQWorker } from './src/worker/bullmq-worker.js';
 import { createJobHandlers } from './src/worker/handlers/factory.js';
 import { JobProcessor } from './src/worker/job-processor.js';
@@ -40,6 +40,7 @@ function env(name: (typeof REQUIRED_ENV)[number]): string {
 
 for (const name of REQUIRED_ENV) env(name);
 
+const videoMode = parseVideoMode(process.env.E2E_VIDEO_MODE ?? 'live');
 const databaseUrl = env('DATABASE_URL');
 const actorUserId = env('E2E_ACTOR_USER_ID');
 const runId = randomUUID();
@@ -55,8 +56,9 @@ const r2 = new R2StorageAdapter({
   bucket: env('R2_BUCKET'),
   endpoint: process.env.R2_ENDPOINT || undefined,
 });
-const geminiAssets = new GeminiVideoAssetSource({ apiKey: env('GEMINI_API_KEY') });
-const persistence = new DomainPersistence(pool, r2, geminiAssets);
+const liveGeminiAssets = new GeminiVideoAssetSource({ apiKey: env('GEMINI_API_KEY') });
+const remoteAssets = new E2ERemoteAssetSource(videoMode, liveGeminiAssets);
+const persistence = new DomainPersistence(pool, r2, remoteAssets);
 const resolver = new PostgresJobDomainResolver(pool, r2, {
   productDnaModel: env('E2E_PRODUCT_DNA_MODEL'),
   ugcScriptModel: env('E2E_UGC_SCRIPT_MODEL'),
@@ -67,7 +69,7 @@ const jobs = new JobRepository(pool);
 const rpc = new JobRPC(pool);
 const domainJobs = new DomainJobRPC(pool);
 const openai = new OpenAIAdapter({ apiKey: env('OPENAI_API_KEY') });
-const gemini = new GeminiAdapter({ apiKey: env('GEMINI_API_KEY') });
+const gemini = new E2EGeminiAdapter(videoMode, { apiKey: env('GEMINI_API_KEY') });
 const handlers = createJobHandlers({
   jobs,
   inputs: resolver,
@@ -105,7 +107,7 @@ worker.on('failed', (job, error) => {
 });
 
 async function main(): Promise<void> {
-  console.log(`[e2e] starting sandbox run ${runId}`);
+  console.log(`[e2e] starting sandbox run ${runId} video_mode=${videoMode}`);
   await assertSandboxPrerequisites();
 
   const fixture = await createSandboxFixture();
@@ -137,7 +139,7 @@ async function main(): Promise<void> {
   await assertR2Readable(video.storage_key);
   await assertFinancialSettlement(fixture.workspaceId, [productDnaJobId, ugcVideoJobId]);
 
-  console.log('[e2e] PASS live sandbox: Product DNA + UGC video + R2 + exact-once settlement');
+  console.log(`[e2e] PASS sandbox: Product DNA + UGC video (${videoMode}) + R2 + exact-once settlement`);
   console.log(`[e2e] retained fixture for inspection workspace=${fixture.workspaceId} generated_video=${video.id}`);
 }
 
@@ -319,6 +321,11 @@ async function assertFinancialSettlement(workspaceId: string, jobIds: string[]):
     throw new Error(`Credit account invariant failed: balance=${balance} reserved=${reserved} expectedBalance=${initialCredits - expectedSpend}`);
   }
   console.log(`[e2e] exact-once settlement verified spend=${expectedSpend} final_balance=${balance}`);
+}
+
+function parseVideoMode(raw: string): E2EVideoMode {
+  if (raw === 'live' || raw === 'mock') return raw;
+  throw new Error('E2E_VIDEO_MODE must be live or mock');
 }
 
 function parseRedisUrl(raw: string): ConnectionOptions {
