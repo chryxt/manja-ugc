@@ -1,0 +1,71 @@
+name: Job API Concurrency Gate
+
+on:
+  push:
+    branches:
+      - chatgpt/job-api-concurrency
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: job-api-concurrency-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  concurrency-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ugc_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d ugc_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/ugc_test
+      DB_TEST_ADMIN_URL: postgres://postgres:postgres@localhost:5432/ugc_test
+      PGPASSWORD: postgres
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: Bootstrap Supabase-compatible test roles
+        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f ci/bootstrap.sql
+
+      - name: Apply migrations 01-10 from scratch
+        shell: bash
+        run: |
+          set -euo pipefail
+          for migration in db/migrations/*.sql; do
+            echo "Applying ${migration}"
+            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$migration"
+          done
+
+      - name: Install Node dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Run C01-C08 concurrency gate
+        run: npm run test:concurrency

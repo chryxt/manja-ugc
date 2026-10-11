@@ -1,0 +1,11 @@
+{
+  "name": "manja-ugc-db-foundation",
+  "private": true,
+  "version": "0.0.0",
+  "scripts": {
+    "test:concurrency": "node 08_tests/concurrency/02_job_terminal_races.js"
+  },
+  "dependencies": {
+    "pg": "^8.13.1"
+  }
+}
