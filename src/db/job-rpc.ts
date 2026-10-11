@@ -50,15 +50,37 @@ export class JobRPC {
     try {
       const result = await this.pool.query<{ operation_id: string }>(
         `SELECT private.start_job_operation($1, $2, $3, $4, $5::jsonb) AS operation_id`,
-        [
-          jobId,
-          provider,
-          operationKey,
-          operationType,
-          metadata === undefined ? null : JSON.stringify(metadata),
-        ],
+        [jobId, provider, operationKey, operationType, metadata === undefined ? null : JSON.stringify(metadata)],
       );
       return result.rows[0].operation_id;
+    } catch (error) {
+      mapDatabaseError(error, jobId);
+    }
+  }
+
+  async recordOperationSubmission(
+    jobId: string,
+    operationId: string,
+    providerOperationId: string,
+    responseMetadata?: unknown,
+  ): Promise<void> {
+    try {
+      await this.pool.query(
+        `SELECT private.record_job_operation_submission($1, $2, $3, $4::jsonb)`,
+        [jobId, operationId, providerOperationId, responseMetadata === undefined ? null : JSON.stringify(responseMetadata)],
+      );
+    } catch (error) {
+      mapDatabaseError(error, jobId);
+    }
+  }
+
+  async scheduleJobWakeup(jobId: string, operationId: string, delaySeconds = 15): Promise<string> {
+    try {
+      const result = await this.pool.query<{ outbox_id: string }>(
+        `SELECT private.schedule_job_wakeup($1, $2, $3) AS outbox_id`,
+        [jobId, operationId, delaySeconds],
+      );
+      return result.rows[0].outbox_id;
     } catch (error) {
       mapDatabaseError(error, jobId);
     }
@@ -76,15 +98,9 @@ export class JobRPC {
     try {
       await this.pool.query(
         `SELECT private.finalize_job_operation($1, $2, $3, $4, $5::jsonb, $6, $7)`,
-        [
-          jobId,
-          operationId,
-          outcome,
-          providerOperationId ?? null,
+        [jobId, operationId, outcome, providerOperationId ?? null,
           responseMetadata === undefined ? null : JSON.stringify(responseMetadata),
-          errorCode ?? null,
-          errorMessage ?? null,
-        ],
+          errorCode ?? null, errorMessage ?? null],
       );
     } catch (error) {
       mapDatabaseError(error, jobId);
