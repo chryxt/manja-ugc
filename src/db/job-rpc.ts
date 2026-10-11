@@ -49,7 +49,7 @@ export class JobRPC {
   ): Promise<string> {
     try {
       const result = await this.pool.query<{ operation_id: string }>(
-        `SELECT private.start_job_operation($1, $2, $3, $4, $5::jsonb) AS operation_id`,
+        `SELECT private.resume_or_start_job_operation($1, $2, $3, $4, $5::jsonb) AS operation_id`,
         [jobId, provider, operationKey, operationType, metadata === undefined ? null : JSON.stringify(metadata)],
       );
       return result.rows[0].operation_id;
