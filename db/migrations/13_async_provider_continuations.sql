@@ -1,7 +1,5 @@
 BEGIN;
 
--- Allow one authoritative DB job to emit multiple durable dispatch intents over time
--- (initial execution + async provider wakeups) while keeping queue payload thin.
 ALTER TABLE public.job_dispatch_outbox
   ADD COLUMN dispatch_key TEXT;
 
@@ -37,7 +35,75 @@ BEGIN
 END;
 $$;
 
--- Persist a remote async operation ID without falsely marking the operation succeeded.
+-- Crash-safe start primitive. If an earlier worker died while an operation was still
+-- non-terminal, return the same operation UUID so provider idempotency keys remain stable.
+CREATE OR REPLACE FUNCTION private.resume_or_start_job_operation(
+  p_job_id UUID,
+  p_provider public.ai_provider,
+  p_operation_key TEXT,
+  p_operation_type TEXT,
+  p_request_metadata JSONB DEFAULT NULL
+) RETURNS UUID
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = pg_catalog
+AS $$
+DECLARE
+  v_workspace_id UUID;
+  v_job_status public.job_status_enum;
+  v_existing_id UUID;
+  v_existing_provider public.ai_provider;
+  v_existing_type TEXT;
+  v_existing_status public.job_operation_status;
+  v_attempt INTEGER;
+  v_operation_id UUID;
+BEGIN
+  SELECT j.workspace_id,j.status
+  INTO v_workspace_id,v_job_status
+  FROM public.jobs j
+  JOIN public.workspaces w ON w.id=j.workspace_id
+  WHERE j.id=p_job_id AND w.deleted_at IS NULL
+  FOR UPDATE OF j;
+
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Job not found or workspace inactive' USING ERRCODE='P0002';
+  END IF;
+  IF v_job_status NOT IN ('processing','waiting_provider','rendering') THEN
+    RAISE EXCEPTION 'Job state % does not allow operations',v_job_status USING ERRCODE='22023';
+  END IF;
+
+  SELECT id,provider,operation_type,status
+  INTO v_existing_id,v_existing_provider,v_existing_type,v_existing_status
+  FROM public.job_operations
+  WHERE job_id=p_job_id AND operation_key=p_operation_key
+  ORDER BY attempt_number DESC
+  LIMIT 1
+  FOR UPDATE;
+
+  IF FOUND AND v_existing_status IN ('created','submitted','in_progress') THEN
+    IF v_existing_provider<>p_provider OR v_existing_type<>p_operation_type THEN
+      RAISE EXCEPTION 'Active operation identity conflict' USING ERRCODE='22023';
+    END IF;
+    RETURN v_existing_id;
+  END IF;
+
+  SELECT COALESCE(MAX(attempt_number),0)+1
+  INTO v_attempt
+  FROM public.job_operations
+  WHERE job_id=p_job_id AND operation_key=p_operation_key;
+
+  INSERT INTO public.job_operations(
+    workspace_id,job_id,provider,operation_key,operation_type,status,
+    attempt_number,request_metadata,started_at
+  ) VALUES (
+    v_workspace_id,p_job_id,p_provider,p_operation_key,p_operation_type,'in_progress',
+    v_attempt,p_request_metadata,pg_catalog.now()
+  ) RETURNING id INTO v_operation_id;
+
+  RETURN v_operation_id;
+END;
+$$;
+
 CREATE OR REPLACE FUNCTION private.record_job_operation_submission(
   p_job_id UUID,
   p_operation_id UUID,
@@ -102,8 +168,6 @@ BEGIN
 END;
 $$;
 
--- Rearm one durable wakeup row per provider operation. The row itself is reusable;
--- each claim gets a new attempt_count so BullMQ can use a fresh internal delivery ID.
 CREATE OR REPLACE FUNCTION private.schedule_job_wakeup(
   p_job_id UUID,
   p_operation_id UUID,
@@ -181,8 +245,6 @@ BEGIN
 END;
 $$;
 
--- Claim now exposes attempt_count. Queue transport uses outbox_id + attempt_count as its
--- internal delivery identity; the payload remains exactly {jobId}.
 DROP FUNCTION private.claim_outbox_messages(TEXT, INTEGER, INTEGER);
 
 CREATE FUNCTION private.claim_outbox_messages(
@@ -241,9 +303,11 @@ BEGIN
 END;
 $$;
 
+REVOKE ALL ON FUNCTION private.resume_or_start_job_operation(UUID,public.ai_provider,TEXT,TEXT,JSONB) FROM PUBLIC,anon,authenticated;
 REVOKE ALL ON FUNCTION private.record_job_operation_submission(UUID,UUID,TEXT,JSONB) FROM PUBLIC,anon,authenticated;
 REVOKE ALL ON FUNCTION private.schedule_job_wakeup(UUID,UUID,INTEGER) FROM PUBLIC,anon,authenticated;
 REVOKE ALL ON FUNCTION private.claim_outbox_messages(TEXT,INTEGER,INTEGER) FROM PUBLIC,anon,authenticated;
+GRANT EXECUTE ON FUNCTION private.resume_or_start_job_operation(UUID,public.ai_provider,TEXT,TEXT,JSONB) TO service_role;
 GRANT EXECUTE ON FUNCTION private.record_job_operation_submission(UUID,UUID,TEXT,JSONB) TO service_role;
 GRANT EXECUTE ON FUNCTION private.schedule_job_wakeup(UUID,UUID,INTEGER) TO service_role;
 GRANT EXECUTE ON FUNCTION private.claim_outbox_messages(TEXT,INTEGER,INTEGER) TO service_role;
