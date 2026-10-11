@@ -148,10 +148,9 @@ BEGIN
          updated_at = pg_catalog.now()
    WHERE id = p_outbox_id
      AND status = 'processing'
-     AND claim_token = p_claim_token
-     AND lease_expires_at >= pg_catalog.now();
+     AND claim_token = p_claim_token;
   IF NOT FOUND THEN
-    RAISE EXCEPTION 'Outbox claim lost or expired' USING ERRCODE = '55000';
+    RAISE EXCEPTION 'Outbox claim lost' USING ERRCODE = '55000';
   END IF;
 END;
 $$;
@@ -171,6 +170,13 @@ AS $$
 DECLARE
   v_attempt_count INTEGER;
 BEGIN
+  IF p_retry_delay_seconds < 0 OR p_retry_delay_seconds > 3600 THEN
+    RAISE EXCEPTION 'retry delay out of range' USING ERRCODE = '22023';
+  END IF;
+  IF p_max_attempts < 1 OR p_max_attempts > 1000 THEN
+    RAISE EXCEPTION 'max attempts out of range' USING ERRCODE = '22023';
+  END IF;
+
   SELECT attempt_count INTO v_attempt_count
   FROM public.job_dispatch_outbox
   WHERE id = p_outbox_id
@@ -189,7 +195,7 @@ BEGIN
          lease_expires_at = NULL,
          available_at = CASE WHEN v_attempt_count >= p_max_attempts
                              THEN available_at
-                             ELSE pg_catalog.now() + pg_catalog.make_interval(secs => GREATEST(p_retry_delay_seconds, 0))
+                             ELSE pg_catalog.now() + pg_catalog.make_interval(secs => p_retry_delay_seconds)
                         END,
          last_error = pg_catalog.left(COALESCE(p_error_msg, 'unknown dispatch error'), 4000),
          updated_at = pg_catalog.now()
