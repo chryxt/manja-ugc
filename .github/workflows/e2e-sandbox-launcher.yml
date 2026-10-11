@@ -58,10 +58,10 @@ jobs:
       E2E_VEO_MODEL: ${{ inputs.veo_model }}
 
     steps:
-      - name: Checkout E2E implementation branch
+      - name: Checkout merged main
         uses: actions/checkout@v4
         with:
-          ref: chatgpt/node-backend-foundation-v1
+          ref: main
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
