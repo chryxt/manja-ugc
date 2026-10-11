@@ -8,6 +8,7 @@
   "scripts": {
     "test:concurrency": "node 08_tests/concurrency/02_job_terminal_races.js",
     "test:domain": "node 08_tests/domain/03_domain_persistence_smoke.js",
+    "test:e2e:sandbox": "tsx 04_e2e_sandbox_run.ts",
     "typecheck": "tsc -p tsconfig.json"
   },
   "dependencies": {
@@ -22,6 +23,7 @@
   "devDependencies": {
     "@types/node": "^24.7.2",
     "@types/pg": "^8.15.5",
+    "tsx": "^4.20.6",
     "typescript": "^5.9.3"
   }
 }
