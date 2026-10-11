@@ -21,13 +21,13 @@ export class BullMQDispatchQueue implements DispatchQueue {
 
   constructor(private readonly options: BullMQDispatchQueueOptions) {}
 
-  async addJob(queueName: string, payload: JobQueuePayload): Promise<void> {
+  async addJob(queueName: string, payload: JobQueuePayload, deliveryId: string): Promise<void> {
     const queue = this.getQueue(queueName);
 
     await queue.add('execute-job', payload, {
       ...this.getDefaultJobOptions(),
-      // Deterministic identity makes repeated outbox delivery converge on one BullMQ job.
-      jobId: payload.jobId,
+      // Internal delivery identity is per durable outbox attempt. The payload remains {jobId}.
+      jobId: deliveryId,
     });
   }
 
