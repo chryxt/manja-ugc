@@ -5,6 +5,7 @@ import {
   InvalidTransitionError,
   JobNotFoundError,
 } from '../db/errors';
+import { ProviderErrorClassification, ProviderExecutionError } from '../providers/types';
 
 export type WorkerErrorDisposition = 'retry' | 'terminal-failure' | 'operational-stop';
 
@@ -74,8 +75,25 @@ export function classifyWorkerError(error: unknown): WorkerErrorDecision {
     return { disposition: 'operational-stop', code: error.code, message: error.message };
   }
 
+  if (error instanceof ProviderExecutionError) {
+    if (error.classification === ProviderErrorClassification.TRANSIENT) {
+      return { disposition: 'retry', code: error.providerCode, message: error.message };
+    }
+    if (error.classification === ProviderErrorClassification.PERMANENT) {
+      return { disposition: 'terminal-failure', code: error.providerCode, message: error.message };
+    }
+    return { disposition: 'operational-stop', code: error.providerCode, message: error.message };
+  }
+
   const status = err?.statusCode ?? err?.status;
-  if (err?.retryable === true || status === 408 || status === 409 || status === 425 || status === 429 || (status !== undefined && status >= 500)) {
+  if (
+    err?.retryable === true ||
+    status === 408 ||
+    status === 409 ||
+    status === 425 ||
+    status === 429 ||
+    (status !== undefined && status >= 500)
+  ) {
     return { disposition: 'retry', code, message };
   }
 
