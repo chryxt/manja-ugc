@@ -38,13 +38,19 @@ export class OutboxDispatcher {
           throw new Error(`Outbox payload jobId mismatch for ${message.outboxId}`);
         }
 
-        const deliveryId = `${message.outboxId}:${message.attemptCount}`;
+        // BullMQ custom job IDs must not contain ':' because it is used as an
+        // internal Redis key separator. Keep the delivery identity deterministic
+        // while using a BullMQ-safe separator.
+        const deliveryId = `${message.outboxId}-${message.attemptCount}`;
         await this.queue.addJob(message.queueName, { jobId: message.jobId }, deliveryId);
         await this.outbox.complete(message.outboxId, message.claimToken);
         completed += 1;
       } catch (error) {
         failed += 1;
         const errorMessage = error instanceof Error ? error.message : String(error);
+        console.error(
+          `[outbox] dispatch failed outbox=${message.outboxId} attempt=${message.attemptCount} message=${sanitize(errorMessage)}`,
+        );
 
         try {
           await this.outbox.fail(
@@ -63,4 +69,13 @@ export class OutboxDispatcher {
 
     return { claimed: messages.length, completed, failed };
   }
+}
+
+function sanitize(value: string): string {
+  return value
+    .replace(/redis(?:s)?:\/\/[^\s]+/gi, '[redacted-redis-url]')
+    .replace(/postgres(?:ql)?:\/\/[^\s]+/gi, '[redacted-postgres-url]')
+    .replace(/sk-[A-Za-z0-9_-]+/g, '[redacted]')
+    .replace(/AIza[A-Za-z0-9_-]+/g, '[redacted]')
+    .slice(0, 1000);
 }
