@@ -73,3 +73,6 @@ jobs:
 
       - name: Run C01-C08 concurrency gate
         run: npm run test:concurrency
+
+      - name: Run domain persistence smoke gate
+        run: npm run test:domain
