@@ -1,4 +1,5 @@
 import type { JobOperationRecord, JobRecord, JobRepository } from '../../db/job-repository';
+import type { DomainPersistence } from '../../domain/persistence';
 import type { GeminiAdapter } from '../../providers/gemini/gemini-adapter';
 import type { OpenAIAdapter } from '../../providers/openai/openai-adapter';
 import { ProviderErrorClassification, ProviderExecutionError } from '../../providers/types';
@@ -19,6 +20,7 @@ export class UgcVideoHandler implements WorkerJobHandler {
   constructor(
     private readonly jobs: JobRepository,
     private readonly inputs: JobDomainInputResolver,
+    private readonly persistence: DomainPersistence,
     private readonly openai: OpenAIAdapter,
     private readonly gemini: GeminiAdapter,
     options: UgcVideoHandlerOptions = {},
@@ -126,6 +128,28 @@ export class UgcVideoHandler implements WorkerJobHandler {
       );
     }
 
+    const remoteUri = extractVeoVideoUri(status.responsePayload);
+    if (!remoteUri) {
+      throw new ProviderExecutionError(
+        ProviderErrorClassification.FATAL_P0,
+        'VEO_VIDEO_URI_MISSING',
+        `Completed Veo operation ${videoOperation.providerOperationId} returned no downloadable video URI`,
+        status.responsePayload,
+      );
+    }
+
+    // The JobProcessor heartbeat remains active while the remote stream is transferred to R2.
+    // Persist first, then terminalize the provider operation. A transient transfer failure leaves
+    // the operation submitted so the durable continuation can retry the same completed LRO.
+    await context.assertLease();
+    const persisted = await this.persistence.persistGeneratedVideoFromUri(
+      job,
+      videoOperation.providerOperationId,
+      remoteUri,
+      signal,
+    );
+    await context.assertLease();
+
     await context.finalizeSubmittedOperation(
       videoOperation.id,
       'succeeded',
@@ -133,6 +157,7 @@ export class UgcVideoHandler implements WorkerJobHandler {
       {
         provider: status.metadata,
         response: status.responsePayload,
+        persistedVideo: persisted,
       },
     );
 
@@ -215,4 +240,15 @@ function scriptFromOperation(operation: JobOperationRecord): string | null {
   return typeof metadata?.script === 'string' && metadata.script.length > 0
     ? metadata.script
     : null;
+}
+
+function extractVeoVideoUri(response: unknown): string | null {
+  const value = response as {
+    generatedVideos?: Array<{
+      video?: { uri?: unknown };
+    }>;
+  } | null;
+
+  const uri = value?.generatedVideos?.[0]?.video?.uri;
+  return typeof uri === 'string' && uri.length > 0 ? uri : null;
 }
