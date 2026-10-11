@@ -21,7 +21,6 @@ export class ProductDnaHandler implements WorkerJobHandler {
     const existing = await this.jobs.getLatestOperation(job.id, OPERATION_KEY);
     if (existing?.status === 'succeeded') return { kind: 'completed' };
 
-    await context.transition('processing', 'analyzing_product_assets');
     const payload = await this.inputs.getProductDnaPayload(job);
 
     await context.executeProviderTask(
@@ -44,8 +43,6 @@ export class ProductDnaHandler implements WorkerJobHandler {
 
         return {
           providerOperationId: result.providerOperationId,
-          // Store enough result material on the operation for crash-safe recovery until
-          // the dedicated Product DNA persistence model is introduced.
           metadata: {
             provider: result.metadata,
             response: result.responsePayload,
