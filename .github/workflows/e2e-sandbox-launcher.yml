@@ -59,6 +59,27 @@ jobs:
         with:
           node-version: '22'
 
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Provision sandbox schema
+        shell: bash
+        run: |
+          set -euo pipefail
+          READY=$(psql "$DATABASE_URL" -Atqc "SELECT CASE WHEN to_regprocedure('private.create_domain_job_and_reserve_credits(uuid,text,uuid,text,uuid,uuid)') IS NOT NULL AND to_regprocedure('private.schedule_job_wakeup(uuid,uuid,integer)') IS NOT NULL THEN 'yes' ELSE 'no' END")
+          if [ "$READY" = "yes" ]; then
+            echo "Sandbox schema already provisioned; skipping migrations."
+            exit 0
+          fi
+
+          echo "Sandbox schema is not provisioned. Applying migrations 01-14 forward-only..."
+          for migration in db/migrations/*.sql; do
+            echo "Applying ${migration}"
+            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$migration"
+          done
+
       - name: Install dependencies
         run: npm install --no-audit --no-fund
 
