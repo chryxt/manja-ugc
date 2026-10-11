@@ -3,5 +3,5 @@ export interface JobQueuePayload {
 }
 
 export interface DispatchQueue {
-  addJob(queueName: string, payload: JobQueuePayload): Promise<void>;
+  addJob(queueName: string, payload: JobQueuePayload, deliveryId: string): Promise<void>;
 }
