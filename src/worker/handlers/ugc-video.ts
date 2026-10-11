@@ -72,6 +72,9 @@ export class UgcVideoHandler implements WorkerJobHandler {
     }
 
     if (videoOperation.status === 'succeeded') {
+      if (job.status === 'waiting_provider') {
+        await context.transition('rendering', 'provider_video_ready');
+      }
       return { kind: 'completed' };
     }
 
@@ -136,6 +139,13 @@ export class UgcVideoHandler implements WorkerJobHandler {
         `Completed Veo operation ${videoOperation.providerOperationId} returned no downloadable video URI`,
         status.responsePayload,
       );
+    }
+
+    // A completed provider LRO moves the DB job into rendering/persistence before settlement.
+    // This preserves the frozen state machine contract: waiting_provider cannot jump directly
+    // to completed; rendering -> completed is the valid terminal path.
+    if (job.status === 'waiting_provider') {
+      await context.transition('rendering', 'persisting_veo_video');
     }
 
     // The JobProcessor heartbeat remains active while the remote stream is transferred to R2.
