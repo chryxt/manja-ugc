@@ -29,7 +29,7 @@ const errorMessages: Record<string, string> = {
   "file-required": "Pilih file gambar terlebih dahulu.",
   "file-too-large": "File terlalu besar. Maksimal 4 MB pada checkpoint F4B.",
   "unsupported-file-type": "Format belum didukung. Gunakan JPG, PNG, atau WebP.",
-  "r2-unavailable": "R2 belum dikonfigurasi pada deployment ini atau koneksi storage sedang gagal.",
+  "r2-unavailable": "R2 gateway belum siap pada deployment ini atau koneksi storage sedang gagal.",
   "asset-persist-failed": "File sudah dikirim ke storage tetapi metadata gagal disimpan dan upload telah dibersihkan.",
 };
 
@@ -75,7 +75,7 @@ export default async function ProductDetailPage({
             {canMutate ? <form action={uploadAction} className="mt-5 space-y-4">
               <label className="block"><span className="text-xs font-semibold text-neutral-600">Classification</span><select name="assetType" required className="mt-2 h-11 w-full rounded-xl border bg-white px-3 text-sm"><option value="product_closeup">Product close-up</option><option value="packaging">Packaging</option><option value="logo_watermark">Logo / watermark</option><option value="reference">Other reference</option></select></label>
               <label className="block"><span className="text-xs font-semibold text-neutral-600">Image file</span><input name="file" type="file" accept="image/jpeg,image/png,image/webp" required className="mt-2 block w-full rounded-xl border bg-neutral-50 p-3 text-sm" /></label>
-              <div className="flex items-start gap-2 rounded-xl bg-neutral-50 p-3 text-xs leading-5 text-neutral-500"><ShieldCheck className="mt-0.5 size-4 shrink-0" /><span>JPG/PNG/WebP, maksimum 4 MB. File asli disimpan di R2; checksum SHA-256 disimpan di database untuk fidelity tracking.</span></div>
+              <div className="flex items-start gap-2 rounded-xl bg-neutral-50 p-3 text-xs leading-5 text-neutral-500"><ShieldCheck className="mt-0.5 size-4 shrink-0" /><span>JPG/PNG/WebP, maksimum 4 MB. File asli disimpan privat di R2; checksum SHA-256 disimpan di database untuk fidelity tracking.</span></div>
               <button type="submit" className="h-11 w-full rounded-xl bg-neutral-950 px-4 text-sm font-semibold text-white hover:bg-neutral-800">Upload asset</button>
             </form> : <div className="mt-5 rounded-xl bg-neutral-50 p-4 text-sm text-neutral-500">Role member memiliki akses baca saja. Upload hanya tersedia untuk owner/admin.</div>}
           </article>
