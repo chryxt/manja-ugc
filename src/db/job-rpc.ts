@@ -18,7 +18,7 @@ export type JobOperationStatus =
   | 'failed'
   | 'cancelled';
 
-export type AIProvider = 'openai' | 'gemini' | 'replicate' | 'ffmpeg' | 'internal';
+export type AIProvider = 'openai' | 'gemini' | 'ninerouter' | 'replicate' | 'ffmpeg' | 'internal';
 
 export interface ExecutionLease {
   jobId: string;

@@ -8,6 +8,7 @@
   "scripts": {
     "test:concurrency": "node 08_tests/concurrency/02_job_terminal_races.js",
     "test:domain": "node 08_tests/domain/03_domain_persistence_smoke.js",
+    "test:ninerouter": "tsx 08_tests/providers/04_ninerouter_adapter.ts",
     "test:e2e:sandbox": "tsx 04_e2e_sandbox_run.ts",
     "typecheck": "tsc -p tsconfig.json"
   },

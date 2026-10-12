@@ -5,6 +5,7 @@ on:
     branches:
       - chatgpt/job-api-concurrency
       - chatgpt/node-backend-foundation-v1
+      - chatgpt/9router-provider
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -76,3 +77,6 @@ jobs:
 
       - name: Run domain persistence smoke gate
         run: npm run test:domain
+
+      - name: Run 9Router adapter smoke gate
+        run: npm run test:ninerouter
