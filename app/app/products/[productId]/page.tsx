@@ -1,7 +1,8 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { ArrowLeft, ArrowUpRight, Boxes, Dna, FileImage, Sparkles } from "lucide-react";
+import { ArrowLeft, Boxes, Dna, FileImage, ShieldCheck, Sparkles, UploadCloud } from "lucide-react";
 
+import { uploadProductAsset } from "@/app/app/products/actions";
 import { readProductDetail } from "@/lib/products/product-queries";
 import { resolveActiveWorkspace } from "@/lib/workspaces/resolve-workspace";
 
@@ -16,14 +17,39 @@ function renderDnaValue(value: unknown) {
   return "—";
 }
 
-export default async function ProductDetailPage({ params }: { params: Promise<{ productId: string }> }) {
+function formatBytes(value: number | null) {
+  if (value === null) return "unknown size";
+  if (value < 1024 * 1024) return `${Math.max(1, Math.round(value / 1024))} KB`;
+  return `${(value / 1024 / 1024).toFixed(1)} MB`;
+}
+
+const errorMessages: Record<string, string> = {
+  forbidden: "Role kamu tidak diizinkan mengunggah asset.",
+  "invalid-asset-type": "Klasifikasi asset tidak valid.",
+  "file-required": "Pilih file gambar terlebih dahulu.",
+  "file-too-large": "File terlalu besar. Maksimal 4 MB pada checkpoint F4B.",
+  "unsupported-file-type": "Format belum didukung. Gunakan JPG, PNG, atau WebP.",
+  "r2-unavailable": "R2 gateway belum siap pada deployment ini atau koneksi storage sedang gagal.",
+  "asset-persist-failed": "File sudah dikirim ke storage tetapi metadata gagal disimpan dan upload telah dibersihkan.",
+};
+
+export default async function ProductDetailPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ productId: string }>;
+  searchParams: Promise<{ error?: string; uploaded?: string }>;
+}) {
   const workspace = await resolveActiveWorkspace();
   if (!workspace) notFound();
   const { productId } = await params;
+  const query = await searchParams;
   const product = await readProductDetail(workspace, productId);
   if (!product) notFound();
 
   const dnaEntries = product.dnaProfile ? Object.entries(product.dnaProfile) : [];
+  const canMutate = workspace.role === "owner" || workspace.role === "admin";
+  const uploadAction = uploadProductAsset.bind(null, product.id);
 
   return (
     <main className="p-5 sm:p-7 lg:p-9">
@@ -32,8 +58,11 @@ export default async function ProductDetailPage({ params }: { params: Promise<{ 
 
         <div className="mt-6 flex flex-col gap-5 sm:flex-row sm:items-start sm:justify-between">
           <div className="flex items-start gap-4"><span className="grid size-12 place-items-center rounded-2xl bg-neutral-950 text-white"><Boxes className="size-5" /></span><div><p className="text-sm font-medium text-neutral-500">Product detail</p><h1 className="mt-1 text-3xl font-semibold tracking-[-0.035em]">{product.name}</h1><p className="mt-2 max-w-2xl text-sm leading-6 text-neutral-500">{product.description || "Belum ada deskripsi produk."}</p></div></div>
-          <div className="flex gap-2"><span className={`rounded-full px-3 py-1.5 text-xs font-semibold ${product.dnaProfile ? "bg-emerald-50 text-emerald-700" : "bg-neutral-100 text-neutral-500"}`}>{product.dnaProfile ? "DNA Ready" : "DNA Pending"}</span></div>
+          <span className={`rounded-full px-3 py-1.5 text-xs font-semibold ${product.dnaProfile ? "bg-emerald-50 text-emerald-700" : "bg-neutral-100 text-neutral-500"}`}>{product.dnaProfile ? "DNA Ready" : "DNA Pending"}</span>
         </div>
+
+        {query.uploaded ? <div className="mt-6 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-700">Asset berhasil diunggah ke R2 dan metadata sudah tersimpan.</div> : null}
+        {query.error ? <div className="mt-6 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700">{errorMessages[query.error] ?? "Upload asset gagal."}</div> : null}
 
         <section className="mt-8 grid gap-4 lg:grid-cols-[1.15fr_0.85fr]">
           <article className="rounded-2xl border bg-white p-6">
@@ -42,9 +71,19 @@ export default async function ProductDetailPage({ params }: { params: Promise<{ 
           </article>
 
           <article className="rounded-2xl border bg-white p-6">
-            <div className="flex items-center justify-between"><div><p className="text-sm font-semibold">Source assets</p><p className="mt-1 text-sm text-neutral-500">{product.assets.length} asset terhubung.</p></div><FileImage className="size-5 text-neutral-400" /></div>
-            {product.assets.length === 0 ? <div className="mt-6 rounded-xl border border-dashed bg-neutral-50 p-6 text-sm text-neutral-500">Belum ada asset. Upload close-up, packaging, dan logo masuk pada F4B.</div> : <div className="mt-5 space-y-2">{product.assets.map((asset) => <div key={asset.id} className="flex items-center justify-between rounded-xl bg-neutral-50 px-3 py-3"><div><p className="text-sm font-medium capitalize">{asset.assetType.replaceAll("_", " ")}</p><p className="mt-0.5 text-xs text-neutral-400">{asset.mimeType || "unknown"}</p></div>{asset.publicUrl ? <a href={asset.publicUrl} target="_blank" rel="noreferrer" className="text-neutral-400 hover:text-neutral-950"><ArrowUpRight className="size-4" /></a> : null}</div>)}</div>}
+            <div className="flex items-center justify-between"><div><p className="text-sm font-semibold">Upload source asset</p><p className="mt-1 text-sm text-neutral-500">Original image dipertahankan untuk Product Accuracy Lock.</p></div><UploadCloud className="size-5 text-neutral-400" /></div>
+            {canMutate ? <form action={uploadAction} className="mt-5 space-y-4">
+              <label className="block"><span className="text-xs font-semibold text-neutral-600">Classification</span><select name="assetType" required className="mt-2 h-11 w-full rounded-xl border bg-white px-3 text-sm"><option value="product_closeup">Product close-up</option><option value="packaging">Packaging</option><option value="logo_watermark">Logo / watermark</option><option value="reference">Other reference</option></select></label>
+              <label className="block"><span className="text-xs font-semibold text-neutral-600">Image file</span><input name="file" type="file" accept="image/jpeg,image/png,image/webp" required className="mt-2 block w-full rounded-xl border bg-neutral-50 p-3 text-sm" /></label>
+              <div className="flex items-start gap-2 rounded-xl bg-neutral-50 p-3 text-xs leading-5 text-neutral-500"><ShieldCheck className="mt-0.5 size-4 shrink-0" /><span>JPG/PNG/WebP, maksimum 4 MB. File asli disimpan privat di R2; checksum SHA-256 disimpan di database untuk fidelity tracking.</span></div>
+              <button type="submit" className="h-11 w-full rounded-xl bg-neutral-950 px-4 text-sm font-semibold text-white hover:bg-neutral-800">Upload asset</button>
+            </form> : <div className="mt-5 rounded-xl bg-neutral-50 p-4 text-sm text-neutral-500">Role member memiliki akses baca saja. Upload hanya tersedia untuk owner/admin.</div>}
           </article>
+        </section>
+
+        <section className="mt-4 rounded-2xl border bg-white p-6">
+          <div className="flex items-center justify-between"><div><p className="text-sm font-semibold">Source assets</p><p className="mt-1 text-sm text-neutral-500">{product.assets.length} original asset terhubung ke produk.</p></div><FileImage className="size-5 text-neutral-400" /></div>
+          {product.assets.length === 0 ? <div className="mt-6 rounded-xl border border-dashed bg-neutral-50 p-6 text-sm text-neutral-500">Belum ada source asset. Upload close-up, packaging, logo, atau reference image di atas.</div> : <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">{product.assets.map((asset) => <article key={asset.id} className="overflow-hidden rounded-xl border bg-neutral-50">{asset.previewUrl ? <img src={asset.previewUrl} alt={asset.originalFilename || asset.assetType} className="aspect-square w-full object-cover" /> : <div className="grid aspect-square place-items-center bg-neutral-100 text-xs text-neutral-400">Preview unavailable</div>}<div className="p-4"><div className="flex items-center justify-between gap-3"><p className="text-sm font-semibold capitalize">{asset.assetType.replaceAll("_", " ")}</p><ShieldCheck className="size-4 text-emerald-600" /></div><p className="mt-1 truncate text-xs text-neutral-500">{asset.originalFilename || "unnamed"}</p><p className="mt-1 text-xs text-neutral-400">{asset.mimeType || "unknown"} · {formatBytes(asset.sizeBytes)}</p>{asset.checksumSha256 ? <p className="mt-2 truncate font-mono text-[10px] text-neutral-400" title={asset.checksumSha256}>sha256:{asset.checksumSha256.slice(0, 16)}…</p> : null}</div></article>)}</div>}
         </section>
 
         <section className="mt-4 rounded-2xl border bg-white p-6">
