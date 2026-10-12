@@ -1,12 +1,11 @@
 "use server";
 
 import { createHash, randomUUID } from "node:crypto";
-import { Readable } from "node:stream";
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
-import { getR2Storage } from "@/lib/storage/r2-server";
+import { deleteViaR2Gateway, uploadViaR2Gateway } from "@/lib/storage/r2-gateway";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 import { resolveActiveWorkspace } from "@/lib/workspaces/resolve-workspace";
 
@@ -87,15 +86,8 @@ export async function uploadProductAsset(productId: string, formData: FormData) 
   const checksum = createHash("sha256").update(buffer).digest("hex");
   const objectKey = `workspaces/${workspace.id}/products/${productId}/source/${assetType}/${randomUUID()}.${extension}`;
 
-  let storage;
   try {
-    storage = getR2Storage();
-    await storage.uploadFromStream(objectKey, Readable.from(buffer), file.type, {
-      workspace_id: workspace.id,
-      product_id: productId,
-      asset_type: assetType,
-      checksum_sha256: checksum,
-    });
+    await uploadViaR2Gateway(objectKey, buffer, file.type);
   } catch {
     redirect(`/app/products/${productId}?error=r2-unavailable`);
   }
@@ -113,7 +105,7 @@ export async function uploadProductAsset(productId: string, formData: FormData) 
   });
 
   if (insertError) {
-    await storage.deleteObject(objectKey).catch(() => undefined);
+    await deleteViaR2Gateway(objectKey).catch(() => undefined);
     redirect(`/app/products/${productId}?error=asset-persist-failed`);
   }
 

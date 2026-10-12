@@ -1,4 +1,3 @@
-import { getR2StorageOrNull } from "@/lib/storage/r2-server";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 import type { ActiveWorkspace } from "@/lib/workspaces/resolve-workspace";
 
@@ -125,23 +124,16 @@ export async function readProductDetail(workspace: ActiveWorkspace, productId: s
   if (assetError) throw new Error(`Failed to read product assets: ${assetError.message}`);
   if (bindingError) throw new Error(`Failed to read product jobs: ${bindingError.message}`);
 
-  const storage = getR2StorageOrNull();
-  const mappedAssets = await Promise.all((assets ?? []).map(async (asset) => {
-    let previewUrl: string | null = null;
-    if (storage && asset.mime_type?.startsWith("image/")) {
-      previewUrl = await storage.generatePresignedUrl(asset.storage_key, 900).catch(() => null);
-    }
-    return {
-      id: asset.id,
-      assetType: asset.asset_type,
-      storageKey: asset.storage_key,
-      previewUrl,
-      mimeType: asset.mime_type,
-      sizeBytes: asset.size_bytes,
-      originalFilename: asset.original_filename,
-      checksumSha256: asset.checksum_sha256,
-      createdAt: asset.created_at,
-    };
+  const mappedAssets: ProductDetail["assets"] = (assets ?? []).map((asset) => ({
+    id: asset.id,
+    assetType: asset.asset_type,
+    storageKey: asset.storage_key,
+    previewUrl: asset.mime_type?.startsWith("image/") ? `/app/assets/${asset.id}` : null,
+    mimeType: asset.mime_type,
+    sizeBytes: asset.size_bytes,
+    originalFilename: asset.original_filename,
+    checksumSha256: asset.checksum_sha256,
+    createdAt: asset.created_at,
   }));
 
   const jobIds = [...new Set((bindings ?? []).map((binding) => binding.job_id))];
