@@ -234,6 +234,13 @@ export class UgcVideoHandler implements WorkerJobHandler {
               '9Router UGC script route currently requires a string prompt',
             );
           }
+          if (typeof payload.model !== 'string' || payload.model.length === 0) {
+            throw new ProviderExecutionError(
+              ProviderErrorClassification.PERMANENT,
+              'NINEROUTER_MODEL_MISSING',
+              '9Router UGC script route requires an explicit model/combo name',
+            );
+          }
 
           const result = await this.ninerouter!.submit(
             operationId,
