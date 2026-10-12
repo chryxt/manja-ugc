@@ -1,21 +1,10 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { ArrowLeft, Boxes, Dna, FileImage, ShieldCheck, Sparkles, UploadCloud } from "lucide-react";
+import { ArrowLeft, Boxes, BrainCircuit, Dna, FileImage, RefreshCw, ShieldCheck, Sparkles, UploadCloud } from "lucide-react";
 
-import { uploadProductAsset } from "@/app/app/products/actions";
+import { generateProductDnaAction, uploadProductAsset } from "@/app/app/products/actions";
 import { readProductDetail } from "@/lib/products/product-queries";
 import { resolveActiveWorkspace } from "@/lib/workspaces/resolve-workspace";
-
-function prettyKey(value: string) {
-  return value.replaceAll("_", " ").replace(/\b\w/g, (char) => char.toUpperCase());
-}
-
-function renderDnaValue(value: unknown) {
-  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value);
-  if (Array.isArray(value)) return value.map(String).join(", ");
-  if (value && typeof value === "object") return JSON.stringify(value);
-  return "—";
-}
 
 function formatBytes(value: number | null) {
   if (value === null) return "unknown size";
@@ -23,14 +12,39 @@ function formatBytes(value: number | null) {
   return `${(value / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function asString(value: unknown) {
+  return typeof value === "string" ? value : "";
+}
+
+function asStringArray(value: unknown) {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function asRecord(value: unknown) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function ProfileList({ values, empty = "Belum ada insight." }: { values: string[]; empty?: string }) {
+  if (values.length === 0) return <p className="text-sm leading-6 text-neutral-400">{empty}</p>;
+  return <ul className="space-y-2">{values.map((value, index) => <li key={`${value}-${index}`} className="flex gap-2 text-sm leading-6 text-neutral-700"><span className="mt-2 size-1.5 shrink-0 rounded-full bg-neutral-400" /><span>{value}</span></li>)}</ul>;
+}
+
 const errorMessages: Record<string, string> = {
-  forbidden: "Role kamu tidak diizinkan mengunggah asset.",
+  forbidden: "Role kamu tidak diizinkan melakukan aksi ini.",
   "invalid-asset-type": "Klasifikasi asset tidak valid.",
   "file-required": "Pilih file gambar terlebih dahulu.",
-  "file-too-large": "File terlalu besar. Maksimal 4 MB pada checkpoint F4B.",
+  "file-too-large": "File terlalu besar. Maksimal 4 MB per source asset.",
   "unsupported-file-type": "Format belum didukung. Gunakan JPG, PNG, atau WebP.",
   "r2-unavailable": "R2 gateway belum siap pada deployment ini atau koneksi storage sedang gagal.",
   "asset-persist-failed": "File sudah dikirim ke storage tetapi metadata gagal disimpan dan upload telah dibersihkan.",
+  "dna-assets-read-failed": "Metadata source asset tidak dapat dibaca.",
+  "dna-no-assets": "Upload minimal satu source image sebelum membuat Product DNA.",
+  "dna-assets-too-large": "Source asset yang tersedia terlalu besar untuk profiling checkpoint ini.",
+  "dna-r2-unavailable": "Source image tidak dapat dibaca dari private R2 storage.",
+  "dna-ai-unavailable": "AI Gateway belum tersedia pada deployment ini.",
+  "dna-invalid-response": "AI mengembalikan profil yang tidak dapat divalidasi sebagai Product DNA.",
+  "dna-generation-failed": "Product DNA gagal dibuat oleh provider AI. Coba lagi setelah beberapa saat.",
+  "dna-persist-failed": "Product DNA berhasil diproses tetapi gagal disimpan ke product record.",
 };
 
 export default async function ProductDetailPage({
@@ -38,7 +52,7 @@ export default async function ProductDetailPage({
   searchParams,
 }: {
   params: Promise<{ productId: string }>;
-  searchParams: Promise<{ error?: string; uploaded?: string }>;
+  searchParams: Promise<{ error?: string; uploaded?: string; dna?: string }>;
 }) {
   const workspace = await resolveActiveWorkspace();
   if (!workspace) notFound();
@@ -47,9 +61,20 @@ export default async function ProductDetailPage({
   const product = await readProductDetail(workspace, productId);
   if (!product) notFound();
 
-  const dnaEntries = product.dnaProfile ? Object.entries(product.dnaProfile) : [];
   const canMutate = workspace.role === "owner" || workspace.role === "admin";
   const uploadAction = uploadProductAsset.bind(null, product.id);
+  const dnaAction = generateProductDnaAction.bind(null, product.id);
+  const dna = product.dnaProfile ?? {};
+  const visual = asRecord(dna.visualIdentity);
+  const targetAudience = asStringArray(dna.targetAudience);
+  const sellingPoints = asStringArray(dna.sellingPoints);
+  const colors = asStringArray(visual.colors);
+  const observedClaims = asStringArray(dna.observedClaims);
+  const inferredOpportunities = asStringArray(dna.inferredOpportunities);
+  const cautions = asStringArray(dna.cautions);
+  const sourceAssets = Array.isArray(dna.sourceAssets) ? dna.sourceAssets : [];
+  const generatedAt = asString(dna.generatedAt);
+  const model = asString(dna.model);
 
   return (
     <main className="p-5 sm:p-7 lg:p-9">
@@ -62,12 +87,35 @@ export default async function ProductDetailPage({
         </div>
 
         {query.uploaded ? <div className="mt-6 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-700">Asset berhasil diunggah ke R2 dan metadata sudah tersimpan.</div> : null}
-        {query.error ? <div className="mt-6 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700">{errorMessages[query.error] ?? "Upload asset gagal."}</div> : null}
+        {query.dna === "generated" ? <div className="mt-6 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-700">Product DNA berhasil dibuat dari source assets dan tersimpan di product record.</div> : null}
+        {query.error ? <div className="mt-6 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-700">{errorMessages[query.error] ?? "Aksi gagal diproses."}</div> : null}
 
         <section className="mt-8 grid gap-4 lg:grid-cols-[1.15fr_0.85fr]">
           <article className="rounded-2xl border bg-white p-6">
-            <div className="flex items-center justify-between"><div><p className="text-sm font-semibold">Product DNA</p><p className="mt-1 text-sm text-neutral-500">Profil AI tersimpan pada product record.</p></div><Dna className="size-5 text-neutral-400" /></div>
-            {dnaEntries.length === 0 ? <div className="mt-6 rounded-xl border border-dashed bg-neutral-50 p-6 text-sm text-neutral-500">Product DNA belum tersedia. Product DNA generation akan diaktifkan pada F5.</div> : <dl className="mt-6 grid gap-3 sm:grid-cols-2">{dnaEntries.map(([key, value]) => <div key={key} className="rounded-xl bg-neutral-50 p-4"><dt className="text-[11px] font-semibold uppercase tracking-wider text-neutral-400">{prettyKey(key)}</dt><dd className="mt-1 text-sm font-medium leading-5 text-neutral-700">{renderDnaValue(value)}</dd></div>)}</dl>}
+            <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+              <div><p className="text-sm font-semibold">Product DNA</p><p className="mt-1 text-sm text-neutral-500">Profil multimodal yang diturunkan dari source asset authoritative.</p></div>
+              <Dna className="size-5 shrink-0 text-neutral-400" />
+            </div>
+
+            {!product.dnaProfile ? <div className="mt-6 rounded-2xl border border-dashed bg-neutral-50 p-6">
+              <div className="flex items-start gap-3"><span className="grid size-10 shrink-0 place-items-center rounded-xl bg-white shadow-sm"><BrainCircuit className="size-5" /></span><div><p className="text-sm font-semibold text-neutral-800">Profil belum dibuat</p><p className="mt-1 text-sm leading-6 text-neutral-500">AI akan membaca source image secara multimodal, memisahkan fakta yang terlihat dari peluang marketing yang hanya bersifat inferensi, lalu menyimpan hasilnya ke product record.</p></div></div>
+              {canMutate ? <form action={dnaAction} className="mt-5"><button disabled={product.assets.length === 0} type="submit" className="inline-flex h-11 items-center justify-center gap-2 rounded-xl bg-neutral-950 px-5 text-sm font-semibold text-white hover:bg-neutral-800 disabled:cursor-not-allowed disabled:bg-neutral-300"><Sparkles className="size-4" /> Generate Product DNA</button>{product.assets.length === 0 ? <p className="mt-2 text-xs text-neutral-400">Upload minimal satu source image terlebih dahulu.</p> : <p className="mt-2 text-xs text-neutral-400">Menggunakan sampai 4 source image, diprioritaskan close-up, packaging, logo, lalu reference.</p>}</form> : <p className="mt-4 text-xs text-neutral-400">Role member hanya dapat membaca Product DNA yang sudah dibuat.</p>}
+            </div> : <div className="mt-6 space-y-5">
+              <div className="rounded-2xl bg-neutral-950 p-5 text-white"><div className="flex items-center justify-between gap-3"><p className="text-xs font-semibold uppercase tracking-[0.16em] text-neutral-400">AI Profile</p><ShieldCheck className="size-4 text-emerald-400" /></div><p className="mt-3 text-lg font-semibold leading-7">{asString(dna.summary) || "Product profile tersedia."}</p><div className="mt-4 flex flex-wrap gap-2">{asString(dna.category) ? <span className="rounded-full bg-white/10 px-3 py-1 text-xs">{asString(dna.category)}</span> : null}{sourceAssets.length ? <span className="rounded-full bg-white/10 px-3 py-1 text-xs">{sourceAssets.length} source assets</span> : null}</div></div>
+
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div className="rounded-xl border p-4"><p className="text-[11px] font-semibold uppercase tracking-wider text-neutral-400">Positioning</p><p className="mt-2 text-sm leading-6 text-neutral-700">{asString(dna.positioning) || "—"}</p></div>
+                <div className="rounded-xl border p-4"><p className="text-[11px] font-semibold uppercase tracking-wider text-neutral-400">Target audience</p><div className="mt-2 flex flex-wrap gap-1.5">{targetAudience.length ? targetAudience.map((item) => <span key={item} className="rounded-full bg-neutral-100 px-2.5 py-1 text-xs font-medium text-neutral-600">{item}</span>) : <span className="text-sm text-neutral-400">—</span>}</div></div>
+              </div>
+
+              <div className="grid gap-3 sm:grid-cols-2"><div className="rounded-xl bg-neutral-50 p-4"><p className="text-xs font-semibold text-neutral-700">Selling points</p><div className="mt-3"><ProfileList values={sellingPoints} /></div></div><div className="rounded-xl bg-neutral-50 p-4"><p className="text-xs font-semibold text-neutral-700">Observed claims</p><div className="mt-3"><ProfileList values={observedClaims} empty="Tidak ada claim yang cukup jelas untuk dicatat." /></div></div></div>
+
+              <div className="rounded-xl border p-4"><p className="text-xs font-semibold text-neutral-700">Visual identity</p><div className="mt-3 grid gap-3 text-sm sm:grid-cols-2"><div><span className="text-neutral-400">Packaging</span><p className="mt-1 leading-6 text-neutral-700">{asString(visual.packaging) || "—"}</p></div><div><span className="text-neutral-400">Texture</span><p className="mt-1 leading-6 text-neutral-700">{asString(visual.texture) || "—"}</p></div><div><span className="text-neutral-400">Shape</span><p className="mt-1 leading-6 text-neutral-700">{asString(visual.shape) || "—"}</p></div><div><span className="text-neutral-400">Colors</span><div className="mt-1 flex flex-wrap gap-1.5">{colors.length ? colors.map((color) => <span key={color} className="rounded-full bg-neutral-100 px-2.5 py-1 text-xs">{color}</span>) : "—"}</div></div></div></div>
+
+              <div className="grid gap-3 sm:grid-cols-2"><div className="rounded-xl border border-blue-100 bg-blue-50/60 p-4"><p className="text-xs font-semibold text-blue-800">Marketing opportunities</p><div className="mt-3"><ProfileList values={inferredOpportunities} /></div></div><div className="rounded-xl border border-amber-100 bg-amber-50/60 p-4"><p className="text-xs font-semibold text-amber-800">Cautions / jangan diklaim tanpa bukti</p><div className="mt-3"><ProfileList values={cautions} empty="Tidak ada caution tambahan dari profiling ini." /></div></div></div>
+
+              <div className="flex flex-col gap-3 border-t pt-4 text-xs text-neutral-400 sm:flex-row sm:items-center sm:justify-between"><div><p>{model || "AI model metadata unavailable"}</p>{generatedAt ? <p className="mt-1">Generated {new Date(generatedAt).toLocaleString("id-ID")}</p> : null}</div>{canMutate ? <form action={dnaAction}><button type="submit" className="inline-flex h-9 items-center gap-2 rounded-lg border bg-white px-3 font-semibold text-neutral-700 hover:bg-neutral-50"><RefreshCw className="size-3.5" /> Regenerate</button></form> : null}</div>
+            </div>}
           </article>
 
           <article className="rounded-2xl border bg-white p-6">
