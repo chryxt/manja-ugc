@@ -9,7 +9,7 @@ import type { ActiveWorkspace } from "@/lib/workspaces/resolve-workspace";
 const navigation = [
   { label: "Dashboard", icon: Gauge, href: "/app", enabled: true },
   { label: "Products", icon: Boxes, href: "/app/products", enabled: true },
-  { label: "Generate", icon: Sparkles, href: "/app/generate", enabled: false },
+  { label: "Generate", icon: Sparkles, href: "/app/generate", enabled: true },
   { label: "Jobs", icon: Clapperboard, href: "/app/jobs", enabled: false },
   { label: "Media", icon: Images, href: "/app/media", enabled: false },
 ];
