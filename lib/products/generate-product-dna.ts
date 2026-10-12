@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { headers } from "next/headers";
 
 export type ProductDnaSourceAsset = {
   id: string;
@@ -36,10 +37,23 @@ export type ProductDnaProfile = {
 
 const DEFAULT_MODEL = "google/gemini-3.5-flash-lite";
 
-function readGatewayToken() {
-  const token = process.env.AI_GATEWAY_API_KEY || process.env.VERCEL_OIDC_TOKEN;
-  if (!token) throw new Error("AI_GATEWAY_UNAVAILABLE");
-  return token;
+async function readGatewayToken() {
+  const apiKey =
+    process.env.AI_GATEWAY_API_KEY ||
+    process.env.VERCEL_AI_GATEWAY_API_KEY;
+
+  if (apiKey) return apiKey;
+  if (process.env.VERCEL_OIDC_TOKEN) return process.env.VERCEL_OIDC_TOKEN;
+
+  try {
+    const requestHeaders = await headers();
+    const runtimeOidcToken = requestHeaders.get("x-vercel-oidc-token");
+    if (runtimeOidcToken) return runtimeOidcToken;
+  } catch {
+    // Outside a request context there is no runtime OIDC header to inspect.
+  }
+
+  throw new Error("AI_GATEWAY_UNAVAILABLE");
 }
 
 function stringValue(value: unknown, fallback = "Belum dapat disimpulkan dari source asset.") {
@@ -98,7 +112,7 @@ export async function generateProductDna(input: {
 
   const model = process.env.PRODUCT_DNA_MODEL?.trim() || DEFAULT_MODEL;
   const client = new OpenAI({
-    apiKey: readGatewayToken(),
+    apiKey: await readGatewayToken(),
     baseURL: "https://ai-gateway.vercel.sh/v1",
   });
 
