@@ -35,7 +35,14 @@ export type ProductDnaProfile = {
   model: string;
 };
 
-const DEFAULT_MODEL = "google/gemini-3.5-flash-lite";
+const DEFAULT_MODEL = "google/gemini-3.1-flash-lite";
+const INVALID_LEGACY_MODEL = "google/gemini-3.5-flash-lite";
+
+function resolveProductDnaModel() {
+  const configured = process.env.PRODUCT_DNA_MODEL?.trim();
+  if (!configured || configured === INVALID_LEGACY_MODEL) return DEFAULT_MODEL;
+  return configured;
+}
 
 async function readGatewayToken() {
   const apiKey =
@@ -110,7 +117,7 @@ export async function generateProductDna(input: {
 }): Promise<ProductDnaProfile> {
   if (input.assets.length === 0) throw new Error("PRODUCT_DNA_ASSETS_REQUIRED");
 
-  const model = process.env.PRODUCT_DNA_MODEL?.trim() || DEFAULT_MODEL;
+  const model = resolveProductDnaModel();
   const client = new OpenAI({
     apiKey: await readGatewayToken(),
     baseURL: "https://ai-gateway.vercel.sh/v1",
