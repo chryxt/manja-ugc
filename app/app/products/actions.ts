@@ -42,18 +42,20 @@ function sanitizeProviderMessage(value: unknown) {
 
 function readErrorField(error: unknown, field: string) {
   if (!error || typeof error !== "object") return undefined;
-  const value = (error as Record<string, unknown>)[field];
-  return value;
+  return (error as Record<string, unknown>)[field];
 }
 
 function classifyProviderError(error: unknown) {
   const statusValue = readErrorField(error, "status");
   const status = typeof statusValue === "number" ? statusValue : undefined;
-  const codeValue = readErrorField(error, "code");
+  const nestedError = readErrorField(error, "error");
+  const nested = nestedError && typeof nestedError === "object" ? nestedError as Record<string, unknown> : undefined;
+  const codeValue = readErrorField(error, "code") ?? nested?.code;
   const code = typeof codeValue === "string" ? codeValue.slice(0, 120) : undefined;
   const requestIdValue = readErrorField(error, "request_id") ?? readErrorField(error, "requestId");
   const requestId = typeof requestIdValue === "string" ? requestIdValue.slice(0, 180) : undefined;
-  const rawMessage = error instanceof Error ? error.message : String(error ?? "");
+  const nestedMessage = typeof nested?.message === "string" ? nested.message : undefined;
+  const rawMessage = nestedMessage ?? (error instanceof Error ? error.message : String(error ?? ""));
   const message = sanitizeProviderMessage(rawMessage);
   const probe = `${code ?? ""} ${message ?? ""}`.toLowerCase();
 
@@ -68,34 +70,32 @@ function classifyProviderError(error: unknown) {
   return { category, status, code, requestId, message };
 }
 
+function publicProviderReason(input: { status?: number; code?: string; message: string | null }) {
+  const probe = `${input.code ?? ""} ${input.message ?? ""}`.toLowerCase();
+
+  if (/oidc/.test(probe) && /not authorized|not authorised|forbidden|permission|denied/.test(probe)) return "oidc_not_authorized";
+  if (/ai gateway|gateway/.test(probe) && /not enabled|disabled|enable/.test(probe)) return "gateway_not_enabled";
+  if (/invalid/.test(probe) && /token|credential|api.?key/.test(probe)) return "invalid_gateway_credential";
+  if (/billing|payment|required|insufficient.*credit|credit.*insufficient|spend|budget/.test(probe)) return "billing_or_credits";
+  if (/model/.test(probe) && /permission|access|denied|forbidden|not allowed/.test(probe)) return "model_access_denied";
+  if (input.status === 403) return "gateway_forbidden";
+  if (input.status === 401) return "invalid_gateway_credential";
+  return "provider_rejected";
+}
+
 export async function createProduct(formData: FormData) {
   const workspace = await resolveActiveWorkspace();
   if (!workspace) redirect("/app/products/new?error=no-workspace");
-  if (workspace.role !== "owner" && workspace.role !== "admin") {
-    redirect("/app/products/new?error=forbidden");
-  }
+  if (workspace.role !== "owner" && workspace.role !== "admin") redirect("/app/products/new?error=forbidden");
 
   const name = String(formData.get("name") ?? "").trim();
   const description = String(formData.get("description") ?? "").trim();
-
-  if (name.length < 2 || name.length > 120) {
-    redirect("/app/products/new?error=invalid-name");
-  }
-  if (description.length > 2000) {
-    redirect("/app/products/new?error=description-too-long");
-  }
+  if (name.length < 2 || name.length > 120) redirect("/app/products/new?error=invalid-name");
+  if (description.length > 2000) redirect("/app/products/new?error=description-too-long");
 
   const supabase = await createServerSupabaseClient();
-  const { data, error } = await supabase
-    .from("products")
-    .insert({ workspace_id: workspace.id, name, description: description || null })
-    .select("id")
-    .single();
-
-  if (error) {
-    const code = encodeURIComponent(error.code || "create-failed");
-    redirect(`/app/products/new?error=${code}`);
-  }
+  const { data, error } = await supabase.from("products").insert({ workspace_id: workspace.id, name, description: description || null }).select("id").single();
+  if (error) redirect(`/app/products/new?error=${encodeURIComponent(error.code || "create-failed")}`);
 
   revalidatePath("/app");
   revalidatePath("/app/products");
@@ -105,13 +105,10 @@ export async function createProduct(formData: FormData) {
 export async function uploadProductAsset(productId: string, formData: FormData) {
   const workspace = await resolveActiveWorkspace();
   if (!workspace) redirect(`/app/products/${productId}?error=no-workspace`);
-  if (workspace.role !== "owner" && workspace.role !== "admin") {
-    redirect(`/app/products/${productId}?error=forbidden`);
-  }
+  if (workspace.role !== "owner" && workspace.role !== "admin") redirect(`/app/products/${productId}?error=forbidden`);
 
   const assetType = String(formData.get("assetType") ?? "");
   const file = formData.get("file");
-
   if (!ASSET_TYPES.has(assetType)) redirect(`/app/products/${productId}?error=invalid-asset-type`);
   if (!(file instanceof File) || file.size < 1) redirect(`/app/products/${productId}?error=file-required`);
   if (file.size > MAX_ASSET_BYTES) redirect(`/app/products/${productId}?error=file-too-large`);
@@ -120,24 +117,15 @@ export async function uploadProductAsset(productId: string, formData: FormData) 
   if (!extension) redirect(`/app/products/${productId}?error=unsupported-file-type`);
 
   const supabase = await createServerSupabaseClient();
-  const { data: product, error: productError } = await supabase
-    .from("products")
-    .select("id")
-    .eq("workspace_id", workspace.id)
-    .eq("id", productId)
-    .maybeSingle();
-
+  const { data: product, error: productError } = await supabase.from("products").select("id").eq("workspace_id", workspace.id).eq("id", productId).maybeSingle();
   if (productError || !product) redirect("/app/products?error=product-not-found");
 
   const buffer = Buffer.from(await file.arrayBuffer());
   const checksum = createHash("sha256").update(buffer).digest("hex");
   const objectKey = `workspaces/${workspace.id}/products/${productId}/source/${assetType}/${randomUUID()}.${extension}`;
 
-  try {
-    await uploadViaR2Gateway(objectKey, buffer, file.type);
-  } catch {
-    redirect(`/app/products/${productId}?error=r2-unavailable`);
-  }
+  try { await uploadViaR2Gateway(objectKey, buffer, file.type); }
+  catch { redirect(`/app/products/${productId}?error=r2-unavailable`); }
 
   const { error: insertError } = await supabase.from("product_assets").insert({
     workspace_id: workspace.id,
@@ -165,24 +153,12 @@ export async function uploadProductAsset(productId: string, formData: FormData) 
 export async function generateProductDnaAction(productId: string) {
   const workspace = await resolveActiveWorkspace();
   if (!workspace) redirect(`/app/products/${productId}?error=no-workspace`);
-  if (workspace.role !== "owner" && workspace.role !== "admin") {
-    redirect(`/app/products/${productId}?error=forbidden`);
-  }
+  if (workspace.role !== "owner" && workspace.role !== "admin") redirect(`/app/products/${productId}?error=forbidden`);
 
   const supabase = await createServerSupabaseClient();
   const [{ data: product, error: productError }, { data: assetRows, error: assetError }] = await Promise.all([
-    supabase
-      .from("products")
-      .select("id, name, description")
-      .eq("workspace_id", workspace.id)
-      .eq("id", productId)
-      .maybeSingle(),
-    supabase
-      .from("product_assets")
-      .select("id, asset_type, storage_key, mime_type, size_bytes, original_filename, checksum_sha256, created_at")
-      .eq("workspace_id", workspace.id)
-      .eq("product_id", productId)
-      .order("created_at", { ascending: false }),
+    supabase.from("products").select("id, name, description").eq("workspace_id", workspace.id).eq("id", productId).maybeSingle(),
+    supabase.from("product_assets").select("id, asset_type, storage_key, mime_type, size_bytes, original_filename, checksum_sha256, created_at").eq("workspace_id", workspace.id).eq("product_id", productId).order("created_at", { ascending: false }),
   ]);
 
   if (productError || !product) redirect("/app/products?error=product-not-found");
@@ -191,13 +167,11 @@ export async function generateProductDnaAction(productId: string) {
   const candidates = (assetRows ?? [])
     .filter((asset) => Boolean(asset.mime_type && MIME_EXTENSIONS[asset.mime_type]))
     .sort((a, b) => (DNA_ASSET_PRIORITY[a.asset_type] ?? 99) - (DNA_ASSET_PRIORITY[b.asset_type] ?? 99));
-
   if (candidates.length === 0) redirect(`/app/products/${productId}?error=dna-no-assets`);
 
   const selected: typeof candidates = [];
   const seenTypes = new Set<string>();
   let estimatedBytes = 0;
-
   for (const asset of candidates) {
     if (selected.length >= MAX_DNA_SOURCE_ASSETS) break;
     const size = Number(asset.size_bytes ?? 0);
@@ -207,7 +181,6 @@ export async function generateProductDnaAction(productId: string) {
     seenTypes.add(asset.asset_type);
     estimatedBytes += size;
   }
-
   if (selected.length === 0) redirect(`/app/products/${productId}?error=dna-assets-too-large`);
 
   const sources: ProductDnaSourceAsset[] = [];
@@ -216,14 +189,7 @@ export async function generateProductDnaAction(productId: string) {
       const response = await readViaR2Gateway(asset.storage_key);
       const bytes = Buffer.from(await response.arrayBuffer());
       if (bytes.length === 0) throw new Error("R2 source asset is empty");
-      sources.push({
-        id: asset.id,
-        assetType: asset.asset_type,
-        mimeType: asset.mime_type as string,
-        originalFilename: asset.original_filename,
-        checksumSha256: asset.checksum_sha256,
-        bytes,
-      });
+      sources.push({ id: asset.id, assetType: asset.asset_type, mimeType: asset.mime_type as string, originalFilename: asset.original_filename, checksumSha256: asset.checksum_sha256, bytes });
     }
   } catch {
     redirect(`/app/products/${productId}?error=dna-r2-unavailable`);
@@ -231,35 +197,24 @@ export async function generateProductDnaAction(productId: string) {
 
   let profile;
   try {
-    profile = await generateProductDna({
-      name: product.name,
-      description: product.description,
-      assets: sources,
-    });
+    profile = await generateProductDna({ name: product.name, description: product.description, assets: sources });
   } catch (error) {
     const message = error instanceof Error ? error.message : "";
     if (message === "AI_GATEWAY_UNAVAILABLE") redirect(`/app/products/${productId}?error=dna-ai-unavailable`);
     if (message === "PRODUCT_DNA_INVALID_RESPONSE" || message === "PRODUCT_DNA_EMPTY_RESPONSE") {
       const diagnosticId = randomUUID().slice(0, 8);
-      console.error(JSON.stringify({
-        event: "product_dna_provider_error",
-        diagnosticId,
-        category: "malformed_response",
-        workspaceId: workspace.id,
-        productId,
-        sourceAssetCount: sources.length,
-        sourceBytes: sources.reduce((total, asset) => total + asset.bytes.length, 0),
-        message,
-      }));
-      redirect(`/app/products/${productId}?error=dna-invalid-response&diag=${diagnosticId}&provider=malformed_response`);
+      console.error(JSON.stringify({ event: "product_dna_provider_error", diagnosticId, category: "malformed_response", workspaceId: workspace.id, productId, sourceAssetCount: sources.length, sourceBytes: sources.reduce((total, asset) => total + asset.bytes.length, 0), message }));
+      redirect(`/app/products/${productId}?error=dna-invalid-response&diag=${diagnosticId}&provider=malformed_response&reason=malformed_response`);
     }
 
     const diagnosticId = randomUUID().slice(0, 8);
     const diagnostic = classifyProviderError(error);
+    const reason = publicProviderReason(diagnostic);
     console.error(JSON.stringify({
       event: "product_dna_provider_error",
       diagnosticId,
       category: diagnostic.category,
+      reason,
       status: diagnostic.status ?? null,
       code: diagnostic.code ?? null,
       requestId: diagnostic.requestId ?? null,
@@ -270,21 +225,12 @@ export async function generateProductDnaAction(productId: string) {
       message: diagnostic.message,
     }));
 
-    const params = new URLSearchParams({
-      error: "dna-generation-failed",
-      diag: diagnosticId,
-      provider: diagnostic.category,
-    });
+    const params = new URLSearchParams({ error: "dna-generation-failed", diag: diagnosticId, provider: diagnostic.category, reason });
     if (diagnostic.status) params.set("status", String(diagnostic.status));
     redirect(`/app/products/${productId}?${params.toString()}`);
   }
 
-  const { error: updateError } = await supabase
-    .from("products")
-    .update({ dna_profile: profile })
-    .eq("workspace_id", workspace.id)
-    .eq("id", productId);
-
+  const { error: updateError } = await supabase.from("products").update({ dna_profile: profile }).eq("workspace_id", workspace.id).eq("id", productId);
   if (updateError) redirect(`/app/products/${productId}?error=dna-persist-failed`);
 
   revalidatePath("/app");
