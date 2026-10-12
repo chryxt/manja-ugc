@@ -36,7 +36,7 @@ export type ProductDnaProfile = {
 };
 
 const DEFAULT_GATEWAY_MODEL = "google/gemini-3.1-flash-lite";
-const DEFAULT_DIRECT_GEMINI_MODEL = "gemini-2.5-flash";
+const DEFAULT_DIRECT_GEMINI_MODEL = "gemini-3.5-flash-lite";
 const INVALID_LEGACY_MODEL = "google/gemini-3.5-flash-lite";
 
 function resolveGatewayModel() {
