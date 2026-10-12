@@ -1,3 +1,4 @@
+import { getR2StorageOrNull } from "@/lib/storage/r2-server";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 import type { ActiveWorkspace } from "@/lib/workspaces/resolve-workspace";
 
@@ -23,9 +24,12 @@ export type ProductDetail = {
   assets: Array<{
     id: string;
     assetType: string;
-    publicUrl: string | null;
+    storageKey: string;
+    previewUrl: string | null;
     mimeType: string | null;
     sizeBytes: number | null;
+    originalFilename: string | null;
+    checksumSha256: string | null;
     createdAt: string;
   }>;
   jobs: Array<{
@@ -108,7 +112,7 @@ export async function readProductDetail(workspace: ActiveWorkspace, productId: s
   const [{ data: assets, error: assetError }, { data: bindings, error: bindingError }] = await Promise.all([
     supabase
       .from("product_assets")
-      .select("id, asset_type, public_url, mime_type, size_bytes, created_at")
+      .select("id, asset_type, storage_key, mime_type, size_bytes, original_filename, checksum_sha256, created_at")
       .eq("workspace_id", workspace.id)
       .eq("product_id", productId)
       .order("created_at", { ascending: false }),
@@ -120,6 +124,25 @@ export async function readProductDetail(workspace: ActiveWorkspace, productId: s
   ]);
   if (assetError) throw new Error(`Failed to read product assets: ${assetError.message}`);
   if (bindingError) throw new Error(`Failed to read product jobs: ${bindingError.message}`);
+
+  const storage = getR2StorageOrNull();
+  const mappedAssets = await Promise.all((assets ?? []).map(async (asset) => {
+    let previewUrl: string | null = null;
+    if (storage && asset.mime_type?.startsWith("image/")) {
+      previewUrl = await storage.generatePresignedUrl(asset.storage_key, 900).catch(() => null);
+    }
+    return {
+      id: asset.id,
+      assetType: asset.asset_type,
+      storageKey: asset.storage_key,
+      previewUrl,
+      mimeType: asset.mime_type,
+      sizeBytes: asset.size_bytes,
+      originalFilename: asset.original_filename,
+      checksumSha256: asset.checksum_sha256,
+      createdAt: asset.created_at,
+    };
+  }));
 
   const jobIds = [...new Set((bindings ?? []).map((binding) => binding.job_id))];
   let jobs: ProductDetail["jobs"] = [];
@@ -142,7 +165,7 @@ export async function readProductDetail(workspace: ActiveWorkspace, productId: s
     dnaSourceJobId: product.dna_source_job_id,
     createdAt: product.created_at,
     updatedAt: product.updated_at,
-    assets: (assets ?? []).map((asset) => ({ id: asset.id, assetType: asset.asset_type, publicUrl: asset.public_url, mimeType: asset.mime_type, sizeBytes: asset.size_bytes, createdAt: asset.created_at })),
+    assets: mappedAssets,
     jobs,
   };
 }
