@@ -30,6 +30,44 @@ function safeFilename(value: string) {
   return value.replace(/[^a-zA-Z0-9._ -]/g, "_").slice(0, 180);
 }
 
+function sanitizeProviderMessage(value: unknown) {
+  if (typeof value !== "string") return null;
+  return value
+    .replace(/data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+/g, "[redacted-image]")
+    .replace(/Bearer\s+[A-Za-z0-9._~+\/-]+/gi, "Bearer [redacted]")
+    .replace(/eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}/g, "[redacted-jwt]")
+    .replace(/[A-Za-z0-9_-]{96,}/g, "[redacted-long-token]")
+    .slice(0, 800);
+}
+
+function readErrorField(error: unknown, field: string) {
+  if (!error || typeof error !== "object") return undefined;
+  const value = (error as Record<string, unknown>)[field];
+  return value;
+}
+
+function classifyProviderError(error: unknown) {
+  const statusValue = readErrorField(error, "status");
+  const status = typeof statusValue === "number" ? statusValue : undefined;
+  const codeValue = readErrorField(error, "code");
+  const code = typeof codeValue === "string" ? codeValue.slice(0, 120) : undefined;
+  const requestIdValue = readErrorField(error, "request_id") ?? readErrorField(error, "requestId");
+  const requestId = typeof requestIdValue === "string" ? requestIdValue.slice(0, 180) : undefined;
+  const rawMessage = error instanceof Error ? error.message : String(error ?? "");
+  const message = sanitizeProviderMessage(rawMessage);
+  const probe = `${code ?? ""} ${message ?? ""}`.toLowerCase();
+
+  let category = "provider_error";
+  if (status === 401 || status === 403 || /auth|credential|api.?key|unauthor|forbidden/.test(probe)) category = "gateway_auth";
+  else if (status === 404 || /model.*not.*found|unknown model|invalid model/.test(probe)) category = "model_not_found";
+  else if (status === 408 || status === 504 || /timeout|timed out/.test(probe)) category = "timeout";
+  else if (status === 429 || /rate.?limit|quota|resource_exhausted/.test(probe)) category = "rate_limit";
+  else if (status === 400 || status === 422 || /invalid_request|unsupported|malformed|input_image/.test(probe)) category = "invalid_request";
+  else if (status && status >= 500) category = "provider_5xx";
+
+  return { category, status, code, requestId, message };
+}
+
 export async function createProduct(formData: FormData) {
   const workspace = await resolveActiveWorkspace();
   if (!workspace) redirect("/app/products/new?error=no-workspace");
@@ -202,9 +240,43 @@ export async function generateProductDnaAction(productId: string) {
     const message = error instanceof Error ? error.message : "";
     if (message === "AI_GATEWAY_UNAVAILABLE") redirect(`/app/products/${productId}?error=dna-ai-unavailable`);
     if (message === "PRODUCT_DNA_INVALID_RESPONSE" || message === "PRODUCT_DNA_EMPTY_RESPONSE") {
-      redirect(`/app/products/${productId}?error=dna-invalid-response`);
+      const diagnosticId = randomUUID().slice(0, 8);
+      console.error(JSON.stringify({
+        event: "product_dna_provider_error",
+        diagnosticId,
+        category: "malformed_response",
+        workspaceId: workspace.id,
+        productId,
+        sourceAssetCount: sources.length,
+        sourceBytes: sources.reduce((total, asset) => total + asset.bytes.length, 0),
+        message,
+      }));
+      redirect(`/app/products/${productId}?error=dna-invalid-response&diag=${diagnosticId}&provider=malformed_response`);
     }
-    redirect(`/app/products/${productId}?error=dna-generation-failed`);
+
+    const diagnosticId = randomUUID().slice(0, 8);
+    const diagnostic = classifyProviderError(error);
+    console.error(JSON.stringify({
+      event: "product_dna_provider_error",
+      diagnosticId,
+      category: diagnostic.category,
+      status: diagnostic.status ?? null,
+      code: diagnostic.code ?? null,
+      requestId: diagnostic.requestId ?? null,
+      workspaceId: workspace.id,
+      productId,
+      sourceAssetCount: sources.length,
+      sourceBytes: sources.reduce((total, asset) => total + asset.bytes.length, 0),
+      message: diagnostic.message,
+    }));
+
+    const params = new URLSearchParams({
+      error: "dna-generation-failed",
+      diag: diagnosticId,
+      provider: diagnostic.category,
+    });
+    if (diagnostic.status) params.set("status", String(diagnostic.status));
+    redirect(`/app/products/${productId}?${params.toString()}`);
   }
 
   const { error: updateError } = await supabase
