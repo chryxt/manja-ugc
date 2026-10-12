@@ -1,0 +1,282 @@
+import OpenAI from "openai";
+import { headers } from "next/headers";
+
+export type ProductDnaSourceAsset = {
+  id: string;
+  assetType: string;
+  mimeType: string;
+  originalFilename: string | null;
+  checksumSha256: string | null;
+  bytes: Buffer;
+};
+
+export type ProductDnaProfile = {
+  summary: string;
+  category: string;
+  positioning: string;
+  targetAudience: string[];
+  sellingPoints: string[];
+  visualIdentity: {
+    colors: string[];
+    packaging: string;
+    texture: string;
+    shape: string;
+  };
+  observedClaims: string[];
+  inferredOpportunities: string[];
+  cautions: string[];
+  sourceAssets: Array<{
+    id: string;
+    assetType: string;
+    originalFilename: string | null;
+    checksumSha256: string | null;
+  }>;
+  generatedAt: string;
+  model: string;
+};
+
+const DEFAULT_GATEWAY_MODEL = "google/gemini-3.1-flash-lite";
+const DEFAULT_DIRECT_GEMINI_MODEL = "gemini-3.5-flash-lite";
+const INVALID_LEGACY_MODEL = "google/gemini-3.5-flash-lite";
+
+function resolveGatewayModel() {
+  const configured = process.env.PRODUCT_DNA_MODEL?.trim();
+  if (!configured || configured === INVALID_LEGACY_MODEL) return DEFAULT_GATEWAY_MODEL;
+  return configured;
+}
+
+function resolveDirectGeminiModel() {
+  return process.env.PRODUCT_DNA_GEMINI_MODEL?.trim() || DEFAULT_DIRECT_GEMINI_MODEL;
+}
+
+function readGeminiApiKey() {
+  return (
+    process.env.GEMINI_API_KEY?.trim() ||
+    process.env.GOOGLE_GENERATIVE_AI_API_KEY?.trim() ||
+    process.env.GOOGLE_API_KEY?.trim() ||
+    null
+  );
+}
+
+async function readGatewayToken() {
+  const apiKey =
+    process.env.AI_GATEWAY_API_KEY ||
+    process.env.VERCEL_AI_GATEWAY_API_KEY;
+
+  if (apiKey) return apiKey;
+  if (process.env.VERCEL_OIDC_TOKEN) return process.env.VERCEL_OIDC_TOKEN;
+
+  try {
+    const requestHeaders = await headers();
+    const runtimeOidcToken = requestHeaders.get("x-vercel-oidc-token");
+    if (runtimeOidcToken) return runtimeOidcToken;
+  } catch {
+    // Outside a request context there is no runtime OIDC header to inspect.
+  }
+
+  throw new Error("AI_GATEWAY_UNAVAILABLE");
+}
+
+function stringValue(value: unknown, fallback = "Belum dapat disimpulkan dari source asset.") {
+  return typeof value === "string" && value.trim() ? value.trim() : fallback;
+}
+
+function stringArray(value: unknown) {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string").map((item) => item.trim()).filter(Boolean).slice(0, 12);
+}
+
+function parseJsonObject(text: string): Record<string, unknown> {
+  const cleaned = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "");
+  const parsed = JSON.parse(cleaned) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("PRODUCT_DNA_INVALID_RESPONSE");
+  return parsed as Record<string, unknown>;
+}
+
+function normalizeProfile(raw: Record<string, unknown>, assets: ProductDnaSourceAsset[], model: string): ProductDnaProfile {
+  const visual = raw.visualIdentity && typeof raw.visualIdentity === "object" && !Array.isArray(raw.visualIdentity)
+    ? raw.visualIdentity as Record<string, unknown>
+    : {};
+
+  return {
+    summary: stringValue(raw.summary),
+    category: stringValue(raw.category, "Unclassified"),
+    positioning: stringValue(raw.positioning),
+    targetAudience: stringArray(raw.targetAudience),
+    sellingPoints: stringArray(raw.sellingPoints),
+    visualIdentity: {
+      colors: stringArray(visual.colors),
+      packaging: stringValue(visual.packaging),
+      texture: stringValue(visual.texture),
+      shape: stringValue(visual.shape),
+    },
+    observedClaims: stringArray(raw.observedClaims),
+    inferredOpportunities: stringArray(raw.inferredOpportunities),
+    cautions: stringArray(raw.cautions),
+    sourceAssets: assets.map((asset) => ({
+      id: asset.id,
+      assetType: asset.assetType,
+      originalFilename: asset.originalFilename,
+      checksumSha256: asset.checksumSha256,
+    })),
+    generatedAt: new Date().toISOString(),
+    model,
+  };
+}
+
+function buildPrompt(input: { name: string; description: string | null; assets: ProductDnaSourceAsset[] }) {
+  const sourceLegend = input.assets
+    .map((asset, index) => `Image ${index + 1}: ${asset.assetType}${asset.originalFilename ? ` (${asset.originalFilename})` : ""}`)
+    .join("\n");
+
+  return [
+    "You are profiling a real ecommerce product from authoritative source images.",
+    "Product Accuracy Lock: treat the attached images as source evidence. Never invent packaging text, ingredients, certifications, weight, flavor, brand claims, medical claims, halal claims, expiry dates, or guarantees that are not clearly visible or supplied in the product description.",
+    "Separate facts visible in the source assets from marketing opportunities that are merely inferred.",
+    "Return ONLY valid JSON. Do not use markdown fences.",
+    "Use Indonesian for all descriptive values.",
+    "Required JSON shape:",
+    JSON.stringify({
+      summary: "short product profile",
+      category: "product category",
+      positioning: "recommended positioning grounded in evidence",
+      targetAudience: ["audience"],
+      sellingPoints: ["evidence-grounded selling point"],
+      visualIdentity: {
+        colors: ["dominant color"],
+        packaging: "packaging description",
+        texture: "visible product texture",
+        shape: "visible product shape/form",
+      },
+      observedClaims: ["only claims/text visibly supported by image or supplied description"],
+      inferredOpportunities: ["clearly framed opportunity, not factual claim"],
+      cautions: ["uncertain or unreadable information that should not be claimed"],
+    }),
+    `Product name: ${input.name}`,
+    `Product description supplied by operator: ${input.description || "(none)"}`,
+    "Attached source map:",
+    sourceLegend,
+  ].join("\n");
+}
+
+function providerError(message: string, status?: number, code?: string) {
+  const error = new Error(message) as Error & { status?: number; code?: string };
+  if (status) error.status = status;
+  if (code) error.code = code;
+  return error;
+}
+
+async function generateViaDirectGemini(input: {
+  name: string;
+  description: string | null;
+  assets: ProductDnaSourceAsset[];
+}, apiKey: string): Promise<ProductDnaProfile> {
+  const model = resolveDirectGeminiModel();
+  const parts: Array<Record<string, unknown>> = [{ text: buildPrompt(input) }];
+
+  for (const asset of input.assets) {
+    parts.push({
+      inlineData: {
+        mimeType: asset.mimeType,
+        data: asset.bytes.toString("base64"),
+      },
+    });
+  }
+
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": apiKey,
+      },
+      body: JSON.stringify({
+        contents: [{ role: "user", parts }],
+        generationConfig: {
+          responseMimeType: "application/json",
+          maxOutputTokens: 1800,
+          temperature: 0.2,
+        },
+      }),
+      signal: AbortSignal.timeout(45_000),
+    },
+  );
+
+  const payload = await response.json().catch(() => null) as Record<string, unknown> | null;
+  if (!response.ok) {
+    const nestedError = payload?.error && typeof payload.error === "object" && !Array.isArray(payload.error)
+      ? payload.error as Record<string, unknown>
+      : null;
+    const message = typeof nestedError?.message === "string" ? nestedError.message : `Gemini direct request failed with HTTP ${response.status}`;
+    const code = typeof nestedError?.status === "string" ? nestedError.status : "GEMINI_DIRECT_ERROR";
+    throw providerError(message, response.status, code);
+  }
+
+  const candidates = Array.isArray(payload?.candidates) ? payload.candidates : [];
+  const firstCandidate = candidates[0];
+  const candidateRecord = firstCandidate && typeof firstCandidate === "object" && !Array.isArray(firstCandidate)
+    ? firstCandidate as Record<string, unknown>
+    : null;
+  const content = candidateRecord?.content && typeof candidateRecord.content === "object" && !Array.isArray(candidateRecord.content)
+    ? candidateRecord.content as Record<string, unknown>
+    : null;
+  const responseParts = Array.isArray(content?.parts) ? content.parts : [];
+  const text = responseParts
+    .map((part) => part && typeof part === "object" && !Array.isArray(part) ? (part as Record<string, unknown>).text : null)
+    .filter((value): value is string => typeof value === "string")
+    .join("\n")
+    .trim();
+
+  if (!text) throw providerError("PRODUCT_DNA_EMPTY_RESPONSE", 502, "PRODUCT_DNA_EMPTY_RESPONSE");
+  return normalizeProfile(parseJsonObject(text), input.assets, `google-direct/${model}`);
+}
+
+async function generateViaGateway(input: {
+  name: string;
+  description: string | null;
+  assets: ProductDnaSourceAsset[];
+}): Promise<ProductDnaProfile> {
+  const model = resolveGatewayModel();
+  const client = new OpenAI({
+    apiKey: await readGatewayToken(),
+    baseURL: "https://ai-gateway.vercel.sh/v1",
+  });
+
+  const content: Array<
+    | { type: "input_text"; text: string }
+    | { type: "input_image"; detail: "auto"; image_url: string }
+  > = [{ type: "input_text", text: buildPrompt(input) }];
+
+  for (const asset of input.assets) {
+    content.push({
+      type: "input_image",
+      detail: "auto",
+      image_url: `data:${asset.mimeType};base64,${asset.bytes.toString("base64")}`,
+    });
+  }
+
+  const response = await client.responses.create({
+    model,
+    input: [{ role: "user", content }],
+    max_output_tokens: 1800,
+  });
+
+  if (!response.output_text?.trim()) throw new Error("PRODUCT_DNA_EMPTY_RESPONSE");
+  return normalizeProfile(parseJsonObject(response.output_text), input.assets, model);
+}
+
+export async function generateProductDna(input: {
+  name: string;
+  description: string | null;
+  assets: ProductDnaSourceAsset[];
+}): Promise<ProductDnaProfile> {
+  if (input.assets.length === 0) throw new Error("PRODUCT_DNA_ASSETS_REQUIRED");
+
+  const directGeminiKey = readGeminiApiKey();
+  if (directGeminiKey) {
+    return generateViaDirectGemini(input, directGeminiKey);
+  }
+
+  return generateViaGateway(input);
+}

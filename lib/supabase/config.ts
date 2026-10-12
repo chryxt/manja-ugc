@@ -1,14 +1,18 @@
+const MANJA_UGC_SUPABASE_URL = "https://lraeniijsyubkimxnuoq.supabase.co";
+const MANJA_UGC_SUPABASE_PUBLISHABLE_KEY =
+  "sb_publishable_1IWNrZcx5Ci_eaNLk3cLTA_wo_mgP6J";
+
+/**
+ * Canonical public Supabase configuration for the MANJA UGC web app.
+ *
+ * The project URL and publishable key are intentionally public client
+ * configuration. Authorization remains enforced by Supabase Auth + RLS.
+ * Keeping these values canonical prevents stale Preview environment variables
+ * from silently pointing authentication at a different Supabase project.
+ */
 export function getSupabaseConfig() {
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const key =
-    process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ??
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-
-  if (!url || !key) {
-    throw new Error(
-      "Missing NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY (or NEXT_PUBLIC_SUPABASE_ANON_KEY).",
-    );
-  }
-
-  return { url, key };
+  return {
+    url: MANJA_UGC_SUPABASE_URL,
+    key: MANJA_UGC_SUPABASE_PUBLISHABLE_KEY,
+  };
 }
