@@ -1,7 +1,7 @@
 import type { JobRepository } from '../../db/job-repository';
 import type { DomainPersistence } from '../../domain/persistence';
 import type { GeminiAdapter } from '../../providers/gemini/gemini-adapter';
-import type { NineRouterAdapter } from '../../providers/ninerouter/ninerouter-adapter';
+import { NineRouterAdapter } from '../../providers/ninerouter/ninerouter-adapter';
 import type { OpenAIAdapter } from '../../providers/openai/openai-adapter';
 import type { WorkerJobHandler } from '../job-processor';
 import type { JobDomainInputResolver } from './domain-inputs';
@@ -21,6 +21,11 @@ export interface JobHandlerFactoryDependencies {
 export function createJobHandlers(
   dependencies: JobHandlerFactoryDependencies,
 ): Record<string, WorkerJobHandler> {
+  const scriptProvider = dependencies.ugcVideo?.scriptProvider ?? process.env.UGC_SCRIPT_PROVIDER ?? 'openai';
+  const ninerouter =
+    dependencies.ninerouter ??
+    (scriptProvider === 'ninerouter' ? new NineRouterAdapter() : undefined);
+
   return {
     product_dna: new ProductDnaHandler(
       dependencies.jobs,
@@ -34,7 +39,7 @@ export function createJobHandlers(
       dependencies.persistence,
       dependencies.openai,
       dependencies.gemini,
-      dependencies.ninerouter,
+      ninerouter,
       dependencies.ugcVideo,
     ),
   };
