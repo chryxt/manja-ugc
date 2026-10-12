@@ -1,6 +1,7 @@
 import type { JobOperationRecord, JobRecord, JobRepository } from '../../db/job-repository';
 import type { DomainPersistence } from '../../domain/persistence';
 import type { GeminiAdapter } from '../../providers/gemini/gemini-adapter';
+import type { NineRouterAdapter } from '../../providers/ninerouter/ninerouter-adapter';
 import type { OpenAIAdapter } from '../../providers/openai/openai-adapter';
 import { ProviderErrorClassification, ProviderExecutionError } from '../../providers/types';
 import type { ExecutionContext } from '../execution-context';
@@ -10,12 +11,16 @@ import type { JobDomainInputResolver } from './domain-inputs';
 const SCRIPT_OPERATION_KEY = 'ugc_script_generation';
 const VIDEO_OPERATION_KEY = 'veo_video_generation';
 
+type UgcScriptProvider = 'openai' | 'ninerouter';
+
 export interface UgcVideoHandlerOptions {
   pollDelaySeconds?: number;
+  scriptProvider?: UgcScriptProvider;
 }
 
 export class UgcVideoHandler implements WorkerJobHandler {
   private readonly pollDelaySeconds: number;
+  private readonly scriptProvider: UgcScriptProvider;
 
   constructor(
     private readonly jobs: JobRepository,
@@ -23,9 +28,14 @@ export class UgcVideoHandler implements WorkerJobHandler {
     private readonly persistence: DomainPersistence,
     private readonly openai: OpenAIAdapter,
     private readonly gemini: GeminiAdapter,
+    private readonly ninerouter?: NineRouterAdapter,
     options: UgcVideoHandlerOptions = {},
   ) {
     this.pollDelaySeconds = options.pollDelaySeconds ?? 20;
+    this.scriptProvider = options.scriptProvider ?? parseScriptProvider(process.env.UGC_SCRIPT_PROVIDER);
+    if (this.scriptProvider === 'ninerouter' && !this.ninerouter) {
+      throw new Error('UGC_SCRIPT_PROVIDER=ninerouter requires a NineRouterAdapter dependency');
+    }
   }
 
   async execute(
@@ -141,16 +151,10 @@ export class UgcVideoHandler implements WorkerJobHandler {
       );
     }
 
-    // A completed provider LRO moves the DB job into rendering/persistence before settlement.
-    // This preserves the frozen state machine contract: waiting_provider cannot jump directly
-    // to completed; rendering -> completed is the valid terminal path.
     if (job.status === 'waiting_provider') {
       await context.transition('rendering', 'persisting_veo_video');
     }
 
-    // The JobProcessor heartbeat remains active while the remote stream is transferred to R2.
-    // Persist first, then terminalize the provider operation. A transient transfer failure leaves
-    // the operation submitted so the durable continuation can retry the same completed LRO.
     await context.assertLease();
     const persisted = await this.persistence.persistGeneratedVideoFromUri(
       job,
@@ -200,15 +204,63 @@ export class UgcVideoHandler implements WorkerJobHandler {
       );
     }
 
+    if (
+      this.scriptProvider === 'ninerouter' &&
+      existing &&
+      (existing.status === 'in_progress' || existing.status === 'submitted')
+    ) {
+      throw new ProviderExecutionError(
+        ProviderErrorClassification.FATAL_P0,
+        'NINEROUTER_AMBIGUOUS_SYNC_OPERATION',
+        `9Router script operation ${existing.id} is non-terminal after worker recovery`,
+        existing,
+      );
+    }
+
     const payload = await this.inputs.getUgcScriptPayload(job);
     let generatedScript = '';
 
     await context.executeProviderTask(
-      'openai',
+      this.scriptProvider,
       SCRIPT_OPERATION_KEY,
       'script_generation',
-      { mode: 'ugc_script' },
+      { mode: 'ugc_script', provider: this.scriptProvider },
       async (operationId) => {
+        if (this.scriptProvider === 'ninerouter') {
+          if (typeof payload.input !== 'string') {
+            throw new ProviderExecutionError(
+              ProviderErrorClassification.PERMANENT,
+              'NINEROUTER_UNSUPPORTED_SCRIPT_INPUT',
+              '9Router UGC script route currently requires a string prompt',
+            );
+          }
+
+          const result = await this.ninerouter!.submit(
+            operationId,
+            'script_generation',
+            { model: payload.model, input: payload.input },
+            {
+              jobId: job.id,
+              operationId,
+              workspaceId: job.workspaceId,
+            },
+            signal,
+          );
+          generatedScript = result.responsePayload?.output_text ?? '';
+          if (!generatedScript) {
+            throw new ProviderExecutionError(
+              ProviderErrorClassification.PERMANENT,
+              'NINEROUTER_EMPTY_SCRIPT',
+              '9Router completed script generation without output text',
+              result.responsePayload,
+            );
+          }
+          return {
+            providerOperationId: result.providerOperationId,
+            metadata: { provider: result.metadata, script: generatedScript },
+          };
+        }
+
         const result = await this.openai.submit(
           operationId,
           'script_generation',
@@ -243,6 +295,12 @@ export class UgcVideoHandler implements WorkerJobHandler {
 
     return generatedScript;
   }
+}
+
+function parseScriptProvider(value: string | undefined): UgcScriptProvider {
+  if (!value || value === 'openai') return 'openai';
+  if (value === 'ninerouter') return 'ninerouter';
+  throw new Error(`Unsupported UGC_SCRIPT_PROVIDER ${value}`);
 }
 
 function scriptFromOperation(operation: JobOperationRecord): string | null {
