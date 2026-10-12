@@ -5,16 +5,25 @@ import { createHash, randomUUID } from "node:crypto";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 
-import { deleteViaR2Gateway, uploadViaR2Gateway } from "@/lib/storage/r2-gateway";
+import { generateProductDna, type ProductDnaSourceAsset } from "@/lib/products/generate-product-dna";
+import { deleteViaR2Gateway, readViaR2Gateway, uploadViaR2Gateway } from "@/lib/storage/r2-gateway";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 import { resolveActiveWorkspace } from "@/lib/workspaces/resolve-workspace";
 
 const MAX_ASSET_BYTES = 4_000_000;
+const MAX_DNA_SOURCE_ASSETS = 4;
+const MAX_DNA_TOTAL_BYTES = 12_000_000;
 const ASSET_TYPES = new Set(["product_closeup", "packaging", "logo_watermark", "reference"]);
 const MIME_EXTENSIONS: Record<string, string> = {
   "image/jpeg": "jpg",
   "image/png": "png",
   "image/webp": "webp",
+};
+const DNA_ASSET_PRIORITY: Record<string, number> = {
+  product_closeup: 0,
+  packaging: 1,
+  logo_watermark: 2,
+  reference: 3,
 };
 
 function safeFilename(value: string) {
@@ -113,4 +122,101 @@ export async function uploadProductAsset(productId: string, formData: FormData) 
   revalidatePath("/app/products");
   revalidatePath(`/app/products/${productId}`);
   redirect(`/app/products/${productId}?uploaded=1`);
+}
+
+export async function generateProductDnaAction(productId: string) {
+  const workspace = await resolveActiveWorkspace();
+  if (!workspace) redirect(`/app/products/${productId}?error=no-workspace`);
+  if (workspace.role !== "owner" && workspace.role !== "admin") {
+    redirect(`/app/products/${productId}?error=forbidden`);
+  }
+
+  const supabase = await createServerSupabaseClient();
+  const [{ data: product, error: productError }, { data: assetRows, error: assetError }] = await Promise.all([
+    supabase
+      .from("products")
+      .select("id, name, description")
+      .eq("workspace_id", workspace.id)
+      .eq("id", productId)
+      .maybeSingle(),
+    supabase
+      .from("product_assets")
+      .select("id, asset_type, storage_key, mime_type, size_bytes, original_filename, checksum_sha256, created_at")
+      .eq("workspace_id", workspace.id)
+      .eq("product_id", productId)
+      .order("created_at", { ascending: false }),
+  ]);
+
+  if (productError || !product) redirect("/app/products?error=product-not-found");
+  if (assetError) redirect(`/app/products/${productId}?error=dna-assets-read-failed`);
+
+  const candidates = (assetRows ?? [])
+    .filter((asset) => Boolean(asset.mime_type && MIME_EXTENSIONS[asset.mime_type]))
+    .sort((a, b) => (DNA_ASSET_PRIORITY[a.asset_type] ?? 99) - (DNA_ASSET_PRIORITY[b.asset_type] ?? 99));
+
+  if (candidates.length === 0) redirect(`/app/products/${productId}?error=dna-no-assets`);
+
+  const selected: typeof candidates = [];
+  const seenTypes = new Set<string>();
+  let estimatedBytes = 0;
+
+  for (const asset of candidates) {
+    if (selected.length >= MAX_DNA_SOURCE_ASSETS) break;
+    const size = Number(asset.size_bytes ?? 0);
+    if (size > 0 && estimatedBytes + size > MAX_DNA_TOTAL_BYTES) continue;
+    if (seenTypes.has(asset.asset_type) && selected.length < Math.min(3, candidates.length)) continue;
+    selected.push(asset);
+    seenTypes.add(asset.asset_type);
+    estimatedBytes += size;
+  }
+
+  if (selected.length === 0) redirect(`/app/products/${productId}?error=dna-assets-too-large`);
+
+  const sources: ProductDnaSourceAsset[] = [];
+  try {
+    for (const asset of selected) {
+      const response = await readViaR2Gateway(asset.storage_key);
+      const bytes = Buffer.from(await response.arrayBuffer());
+      if (bytes.length === 0) throw new Error("R2 source asset is empty");
+      sources.push({
+        id: asset.id,
+        assetType: asset.asset_type,
+        mimeType: asset.mime_type as string,
+        originalFilename: asset.original_filename,
+        checksumSha256: asset.checksum_sha256,
+        bytes,
+      });
+    }
+  } catch {
+    redirect(`/app/products/${productId}?error=dna-r2-unavailable`);
+  }
+
+  let profile;
+  try {
+    profile = await generateProductDna({
+      name: product.name,
+      description: product.description,
+      assets: sources,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (message === "AI_GATEWAY_UNAVAILABLE") redirect(`/app/products/${productId}?error=dna-ai-unavailable`);
+    if (message === "PRODUCT_DNA_INVALID_RESPONSE" || message === "PRODUCT_DNA_EMPTY_RESPONSE") {
+      redirect(`/app/products/${productId}?error=dna-invalid-response`);
+    }
+    redirect(`/app/products/${productId}?error=dna-generation-failed`);
+  }
+
+  const { error: updateError } = await supabase
+    .from("products")
+    .update({ dna_profile: profile })
+    .eq("workspace_id", workspace.id)
+    .eq("id", productId);
+
+  if (updateError) redirect(`/app/products/${productId}?error=dna-persist-failed`);
+
+  revalidatePath("/app");
+  revalidatePath("/app/products");
+  revalidatePath(`/app/products/${productId}`);
+  redirect(`/app/products/${productId}?dna=generated`);
 }
