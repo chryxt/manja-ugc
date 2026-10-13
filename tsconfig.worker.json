@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.backend.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "dist-worker",
+    "rootDir": ".",
+    "sourceMap": true,
+    "declaration": false
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", ".next", "dist-worker"]
+}

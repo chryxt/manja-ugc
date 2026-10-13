@@ -1,0 +1,34 @@
+name: Worker Runtime Gate
+
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'package.json'
+      - 'tsconfig.backend.json'
+      - 'tsconfig.worker.json'
+      - 'Dockerfile.worker'
+      - '.github/workflows/worker-runtime.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'package.json'
+      - 'tsconfig.backend.json'
+      - 'tsconfig.worker.json'
+      - 'Dockerfile.worker'
+      - '.github/workflows/worker-runtime.yml'
+
+jobs:
+  worker-runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --no-audit --no-fund
+      - run: npm run worker:build
+      - name: Build production worker image
+        run: docker build -f Dockerfile.worker -t manja-ugc-worker:${{ github.sha }} .
