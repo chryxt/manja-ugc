@@ -164,3 +164,43 @@ export async function generateStoryboardAction(formData: FormData) {
   revalidatePath(`/app/generate/${inserted.id}`);
   redirect(`/app/generate/${inserted.id}?created=1`);
 }
+
+export async function approveStoryboardAction(storyboardId: string) {
+  const workspace = await resolveActiveWorkspace();
+  if (!workspace) redirect(`/app/generate/${storyboardId}?error=no-workspace`);
+  if (workspace.role !== "owner" && workspace.role !== "admin") redirect(`/app/generate/${storyboardId}?error=forbidden`);
+
+  const supabase = await createServerSupabaseClient();
+  const { error } = await supabase.rpc("approve_storyboard", { p_storyboard_id: storyboardId });
+  if (error) {
+    const message = error.message.toLowerCase();
+    const reason = message.includes("not found") ? "storyboard-not-found" : message.includes("draft") ? "approval-invalid-state" : "approval-failed";
+    redirect(`/app/generate/${storyboardId}?error=${reason}`);
+  }
+
+  revalidatePath("/app/generate");
+  revalidatePath(`/app/generate/${storyboardId}`);
+  redirect(`/app/generate/${storyboardId}?approved=1`);
+}
+
+export async function generateVideoAction(storyboardId: string) {
+  const workspace = await resolveActiveWorkspace();
+  if (!workspace) redirect(`/app/generate/${storyboardId}?error=no-workspace`);
+  if (workspace.role !== "owner" && workspace.role !== "admin") redirect(`/app/generate/${storyboardId}?error=forbidden`);
+
+  const supabase = await createServerSupabaseClient();
+  const { data: jobId, error } = await supabase.rpc("create_ugc_video_job", { p_storyboard_id: storyboardId });
+  if (error || typeof jobId !== "string") {
+    const message = (error?.message ?? "").toLowerCase();
+    let reason = "video-job-failed";
+    if (message.includes("approved")) reason = "approval-required";
+    else if (message.includes("insufficient available credits")) reason = "insufficient-credits";
+    else if (message.includes("not found")) reason = "storyboard-not-found";
+    redirect(`/app/generate/${storyboardId}?error=${reason}`);
+  }
+
+  revalidatePath("/app");
+  revalidatePath("/app/generate");
+  revalidatePath(`/app/generate/${storyboardId}`);
+  redirect(`/app/generate/${storyboardId}?video=queued&job=${encodeURIComponent(jobId)}`);
+}
