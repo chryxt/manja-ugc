@@ -133,7 +133,11 @@ async function dispatchTick(): Promise<void> {
     lastDispatchSummary = summary;
     lastDispatchError = null;
     if (summary.claimed > 0 || summary.failed > 0) {
-      log(summary.failed > 0 ? 'warn' : 'info', 'outbox_dispatch', summary);
+      log(summary.failed > 0 ? 'warn' : 'info', 'outbox_dispatch', {
+        claimed: summary.claimed,
+        completed: summary.completed,
+        failed: summary.failed,
+      });
     }
   } catch (error) {
     lastDispatchAt = new Date().toISOString();
