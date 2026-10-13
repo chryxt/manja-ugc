@@ -5,7 +5,6 @@ on:
     paths:
       - 'src/**'
       - 'package.json'
-      - 'package-lock.json'
       - 'tsconfig.backend.json'
       - 'tsconfig.worker.json'
       - 'Dockerfile.worker'
@@ -15,7 +14,6 @@ on:
     paths:
       - 'src/**'
       - 'package.json'
-      - 'package-lock.json'
       - 'tsconfig.backend.json'
       - 'tsconfig.worker.json'
       - 'Dockerfile.worker'
@@ -30,8 +28,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
-      - run: npm ci
+      - run: npm install --no-audit --no-fund
       - run: npm run worker:build
       - name: Build production worker image
         run: docker build -f Dockerfile.worker -t manja-ugc-worker:${{ github.sha }} .
